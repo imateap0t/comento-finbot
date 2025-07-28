@@ -13,10 +13,11 @@ from langchain.chains.summarize import load_summarize_chain
 
 # 환경변수 로드
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+api_key = os.getenv("OPENAI_API_KEY")
+os.environ["OPENAI_API_KEY"] = api_key
 
 # LLM 설정
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
+llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
 # 페이지 설정
 st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
