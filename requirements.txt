@@ -1,0 +1,9 @@
+streamlit
+python-dotenv
+openai
+langchain
+langchain-community
+langchain-openai
+reportlab
+wordcloud
+matplotlib

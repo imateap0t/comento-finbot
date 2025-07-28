@@ -1,0 +1,21 @@
+Comento Finbot - 금융 상담 챗봇
+
+**📌 배포 주소**  
+https://comento-finbot.streamlit.app
+
+
+## 소개
+LLM 기반 상담 챗봇입니다.  
+PDF 문서 기반 분석과 질문 응답, 요약, 시각화를 포함한 Streamlit 프로토타입을 제공합니다.
+
+## 기능
+- PDF 업로드 후 문서 내용 기반 질문 응답
+- GPT 모델을 활용한 답변 제공
+- 워드 클라우드 시각화
+- 자동 요약 및 PDF 다운로드 가능
+
+## 사용 기술 
+- Frontend: Streamlit
+- Backend: Langchain + OpenAI API
+- 기타: WordCloud, Matplotlib, ReportLab
+
