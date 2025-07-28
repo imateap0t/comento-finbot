@@ -13,7 +13,7 @@ from langchain.chains.summarize import load_summarize_chain
 
 # 환경변수 로드
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
+api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
 os.environ["OPENAI_API_KEY"] = api_key
 
 # LLM 설정
