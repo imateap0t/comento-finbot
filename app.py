@@ -76,10 +76,25 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         with open("temp.pdf", "wb") as f:
             f.write(uploaded_file.read())
         pdf_mode = True
-        st.info("PDF를 바탕으로 정보를 제공합니다.")
+        st.markdown(
+            """
+            <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
+                <strong>PDF를 바탕으로 정보를 제공합니다.</strong>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     else:
         pdf_mode = False
-        st.warning("PDF 없이 일반 ETF 정보만 제공합니다.")
+        st.markdown(
+            """
+            <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
+                <strong>PDF 없이 기본적인 ETF 정보를 안내합니다.</strong>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     # 프롬프트 생성 및 응답
     prompt = PromptTemplate.from_template("""
@@ -98,10 +113,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     with st.chat_message("assistant"):
         st.markdown(response)
     st.session_state.messages.append({"role": "assistant", "content": response})
-
-    # 챗봇 출력
-    st.subheader("🤖 챗봇")
-    st.write(response)
 
     # SQLite 연결
     conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
