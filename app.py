@@ -23,6 +23,19 @@ api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
 # LLM 설정
 llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
+
+try:
+    conn = sqlite3.connect("chat_logs.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, msg TEXT)")
+    conn.execute("INSERT INTO test (msg) VALUES ('이건 테스트입니다')")
+    conn.commit()
+    conn.close()
+    st.success("✅ DB 쓰기 성공! chat_logs.db 생성됨.")
+except Exception as e:
+    st.error(f"❌ DB 생성 실패: {e}")
+
+
+
 # 페이지 설정
 st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
 st.title("💹 금융 상담 챗봇")
