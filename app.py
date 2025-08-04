@@ -25,8 +25,8 @@ llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
 # 페이지 설정
 st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
-st.title("💹 ETF 금융 상담 챗봇")
-st.markdown("ETF에 대해 무엇이든 물어보세요!")
+st.title("💹 금융 상담 챗봇")
+st.markdown("금융에 대해 무엇이든 물어보세요!")
 st.markdown("")
 st.markdown(
     """
@@ -93,7 +93,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         st.markdown(
             """
             <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
-                <strong>PDF 없이 기본적인 ETF 정보를 안내합니다.</strong>
+                <strong>PDF 없이 기본적인 금융 정보를 안내합니다.</strong>
             </div>
             """,
             unsafe_allow_html=True
@@ -113,7 +113,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             llm=llm,
             chain_type="stuff",
             retriever=retriever,
-            return_source_documents=True  # 출처 활용 가능하도록
+            return_source_documents=True  # 출처 활용 가능
         )
 
         response = qa_chain.run(question)
@@ -121,11 +121,14 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     else:
         # 📌 문서 없이 답할 경우, 명확하게 “신뢰 가능한 출처” 요청
         prompt = PromptTemplate.from_template("""
-        너는 ETF 투자 관련 정보를 제공하는 전문가야. 아래 기준을 지켜서 질문에 응답해.
-
-        1. 블로그, 커뮤니티, 포럼 등 비공식 출처는 인용하지 마
-        2. 공공기관, 신문기사, 금융 보고서 등 신뢰할 수 있는 자료만 인용해
-        3. 출처가 있을 경우 괄호 안에 명시해 (예: (출처: 한국경제, 2022.05.01))
+            너는 금융투자 분야에 특화된 AI야.
+            질문자가 ETF 뿐만 아니라 예금, 적금, 주식 등도 물어볼 수 있어.
+            아래 기준에 따라 응답해:
+                                              
+            1. 금융 기관, 신문, 보고서 등 신뢰성 높은 자료를 기반으로 작성
+            2. 초보자에게 어려운 용어가 있으면 쉽게 풀이
+            3. 가능하면 관련 정보가 담긴 문서나 FAQ를 요약해서 안내
+            4. 출처가 있을 경우 괄호 안에 명시해 (예: (출처: 한국경제, 2022.05.01))
 
         질문: {question}
         ---
