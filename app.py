@@ -11,11 +11,14 @@ import matplotlib.pyplot as plt
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
+from langchain.vectorstores import FAISS
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.document_loaders import PyPDFLoader
+from langchain.chains import RetrievalQA
 
 # 환경변수 로드
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
-os.environ["OPENAI_API_KEY"] = api_key
 
 # LLM 설정
 llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
@@ -97,17 +100,41 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         )
 
     # 프롬프트 생성 및 응답
-    prompt = PromptTemplate.from_template("""
-    너는 ETF 투자 관련 정보를 제공하는 전문가야.
-    다음과 같이 세부 사항을 포함해서 제시해.
-    1. 참조한 가이드라인 또는 보고서의 출처 및 페이지 정보
-    2. 받은 질문과 유사한 투자자들이 관심 가질만한 질문 3가지
+    if pdf_mode:
+        loader = PyPDFLoader("temp.pdf")
+        docs = loader.load()
 
-    질문: {question}
-    답변:
-    """)
-    formatted_prompt = prompt.format(question=question)
-    response = llm.predict(formatted_prompt)
+        embeddings = OpenAIEmbeddings()
+        vectorstore = FAISS.from_documents(docs, embeddings)
+        retriever = vectorstore.as_retriever()
+
+        # 📌 템플릿 없이 바로 RetrievalQA 실행 (문서 기반 자동)
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=retriever,
+            return_source_documents=True  # 출처 활용 가능하도록
+        )
+
+        response = qa_chain.run(question)
+
+    else:
+        # 📌 문서 없이 답할 경우, 명확하게 “신뢰 가능한 출처” 요청
+        prompt = PromptTemplate.from_template("""
+        너는 ETF 투자 관련 정보를 제공하는 전문가야. 아래 기준을 지켜서 질문에 응답해.
+
+        1. 블로그, 커뮤니티, 포럼 등 비공식 출처는 인용하지 마
+        2. 공공기관, 신문기사, 금융 보고서 등 신뢰할 수 있는 자료만 인용해
+        3. 출처가 있을 경우 괄호 안에 명시해 (예: (출처: 한국경제, 2022.05.01))
+
+        질문: {question}
+        ---
+        답변:
+        """)
+
+        formatted_prompt = prompt.format(question=question)
+        response = llm.predict(formatted_prompt)
+
 
     # 응답 표시
     with st.chat_message("assistant"):

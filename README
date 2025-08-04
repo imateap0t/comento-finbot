@@ -15,3 +15,5 @@ PDF 문서 기반 분석과 질문 응답, 요약, 시각화를 포함한 Stream
 - Backend: Langchain + OpenAI API
 - 기타: WordCloud, Matplotlib, ReportLab
 
+## 업데이트
+- 
