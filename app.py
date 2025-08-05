@@ -117,7 +117,9 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             return_source_documents=True  # 출처 활용 가능
         )
 
-        response = qa_chain.run(question)
+        result = qa_chain.invoke({"query": question})
+        response = result["result"]
+
 
     else:
         # 📌 문서 없이 답할 경우, 명확하게 “신뢰 가능한 출처” 요청
