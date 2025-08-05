@@ -171,7 +171,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     if pdf_mode:
         # 요약
         summarize_chain = load_summarize_chain(llm, chain_type="stuff")
-        summary = summarize_chain.run(response)
+        summary = summarize_chain.run(docs)
 
         st.subheader("📌 요약")
         st.success(summary)
