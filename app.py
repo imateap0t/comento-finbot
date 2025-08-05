@@ -1,3 +1,4 @@
+import base64
 import streamlit as st
 import sqlite3
 from dotenv import load_dotenv
@@ -245,17 +246,26 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             st.error(f"워드 클라우드 생성 중 오류 발생: {e}")
 
     # 응답 표시, PDF 다운로드, 워드 클라우드 출력
+    def get_pdf_download_link(pdf_data):
+        b64 = base64.b64encode(pdf_data).decode()
+        href = f'<a href="data:application/pdf;base64,{b64}" download="etf_response.pdf">📄 답변 PDF 다운로드</a>'
+        return href
+
+    def get_wc_download_link(img_buf):
+        b64 = base64.b64encode(img_buf.getvalue()).decode()
+        href = f'<a href="data:image/png;base64,{b64}" download="wordcloud.png">☁️ 워드클라우드 다운로드</a>'
+        return href
+
+    # 응답 표시 및 다운로드 링크 출력
     with st.chat_message("assistant"):
         st.markdown(response)
-        if st.session_state.get("pdf_download"):
-            st.download_button(
-                label="📄 답변 PDF 다운로드",
-                data=st.session_state.pdf_download,
-                file_name="etf_response.pdf",
-                mime="application/pdf"
-            )
+
+        if "pdf_download" in st.session_state:
+            st.markdown(get_pdf_download_link(st.session_state["pdf_download"]), unsafe_allow_html=True)
+
         if "wordcloud_image" in st.session_state:
             st.image(st.session_state.wordcloud_image)
+            st.markdown(get_wc_download_link(st.session_state.wordcloud_image), unsafe_allow_html=True)
 
 
 
