@@ -147,20 +147,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         formatted_prompt = prompt.format(question=question)
         response = llm.predict(formatted_prompt)
 
-    # 응답 표시, PDF 다운로드, 워드 클라우드 출력
-    with st.chat_message("assistant"):
-        st.markdown(response)
-        
-        if pdf_mode:
-            if st.session_state.get("pdf_download"):
-                st.download_button(
-                    label="📄 답변 PDF 다운로드",
-                    data=st.session_state.pdf_download,
-                    file_name="etf_response.pdf",
-                    mime="application/pdf"
-                )
-            if "wordcloud_image" in st.session_state:
-                st.image(st.session_state.wordcloud_image)
 
     # SQLite 연결
     conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
@@ -257,6 +243,20 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
         except Exception as e:
             st.error(f"워드 클라우드 생성 중 오류 발생: {e}")
+
+    # 응답 표시, PDF 다운로드, 워드 클라우드 출력
+    with st.chat_message("assistant"):
+        st.markdown(response)
+        if st.session_state.get("pdf_download"):
+            st.download_button(
+                label="📄 답변 PDF 다운로드",
+                data=st.session_state.pdf_download,
+                file_name="etf_response.pdf",
+                mime="application/pdf"
+            )
+        if "wordcloud_image" in st.session_state:
+            st.image(st.session_state.wordcloud_image)
+
 
 
 # 좌측 fAq 
