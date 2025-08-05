@@ -1,4 +1,4 @@
 .env
-venv/
+.venv/
 chat_logs.db
 .env
