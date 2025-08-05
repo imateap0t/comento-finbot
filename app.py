@@ -187,15 +187,26 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             summary = None
 
         # pdf 생성
-        try: 
+        try:
             pdf_buffer = BytesIO()
             c = canvas.Canvas(pdf_buffer, pagesize=letter)
             c.setFont('NanumGothic', 12)
             textobject = c.beginText(100, 750)
             textobject.setFont("NanumGothic", 12)
 
-            for line in response[:2000].split('\n'):
+            max_lines_per_page = 40
+            line_count = 0
+
+            for line in response.split('\n'):
+                if line_count >= max_lines_per_page:
+                    c.drawText(textobject)
+                    c.showPage()
+                    textobject = c.beginText(100, 750)
+                    textobject.setFont("NanumGothic", 12)
+                    line_count = 0
                 textobject.textLine(line)
+                line_count += 1
+
             c.drawText(textobject)
             c.save()
             pdf_out = pdf_buffer.getvalue()
@@ -226,10 +237,10 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 return img_buf
 
             # 호출 및 상태 저장
-            if "wordcloud" not in st.session_state:
-                st.session_state.wordcloud = generate_wordcloud_image(response)
+            if "wordcloud_image" not in st.session_state:
+                st.session_state.wordcloud_image = generate_wordcloud_image(response)
 
-            st.image(st.session_state.wordcloud)
+            st.image(st.session_state.wordcloud_image)
         except Exception as e:
             st.error(f"워드 클라우드 생성 중 오류 발생: {e}")
 
