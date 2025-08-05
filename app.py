@@ -137,7 +137,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             1. 금융 기관, 신문, 보고서 등 신뢰성 높은 자료를 기반으로 작성
             2. 초보자에게 어려운 용어가 있으면 쉽게 풀이
             3. 가능하면 관련 정보가 담긴 문서나 FAQ를 요약해서 안내
-            4. 출처가 있을 경우 괄호 안에 명시해 (예: (출처: 한국경제, 2022.05.01))
+            4. 출처가 있을 경우 괄호 안에 명시해 (예: (출처: 한국경제, 2025.08.03))
 
         질문: {question}
         ---
@@ -147,11 +147,20 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         formatted_prompt = prompt.format(question=question)
         response = llm.predict(formatted_prompt)
 
-
-    # 응답 표시
+    # 응답 표시, PDF 다운로드, 워드 클라우드 출력
     with st.chat_message("assistant"):
         st.markdown(response)
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        
+        if pdf_mode:
+            if st.session_state.get("pdf_download"):
+                st.download_button(
+                    label="📄 답변 PDF 다운로드",
+                    data=st.session_state.pdf_download,
+                    file_name="etf_response.pdf",
+                    mime="application/pdf"
+                )
+            if "wordcloud_image" in st.session_state:
+                st.image(st.session_state.wordcloud_image)
 
     # SQLite 연결
     conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
@@ -194,29 +203,37 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             textobject = c.beginText(100, 750)
             textobject.setFont("NanumGothic", 12)
 
+            max_chars_per_line = 90
             max_lines_per_page = 40
-            line_count = 0
 
-            for line in response.split('\n'):
-                if line_count >= max_lines_per_page:
+            textobject = c.beginText(50, 750)
+            textobject.setFont("NanumGothic", 12)
+
+            lines = []
+            for paragraph in response.split('\n'):
+                while len(paragraph) > max_chars_per_line:
+                    lines.append(paragraph[:max_chars_per_line])
+                    paragraph = paragraph[max_chars_per_line:]
+                lines.append(paragraph)
+
+            line_height = 16
+            y = 730
+            for i, line in enumerate(lines):
+                if i != 0 and i % max_lines_per_page == 0:
                     c.drawText(textobject)
                     c.showPage()
-                    textobject = c.beginText(100, 750)
+                    textobject = c.beginText(50, 750)
                     textobject.setFont("NanumGothic", 12)
-                    line_count = 0
+                    y = 750
+                textobject.setTextOrigin(50, y)
                 textobject.textLine(line)
-                line_count += 1
+                y -= line_height
 
             c.drawText(textobject)
             c.save()
             pdf_out = pdf_buffer.getvalue()
+            st.session_state.pdf_download = pdf_out
 
-            st.download_button(
-                label="답변 PDF 다운로드",
-                data=pdf_out,
-                file_name="etf_response.pdf",
-                mime="application/pdf"
-            )
         except Exception as e:
             st.error(f"PDF 생성 중 오류 발생: {e}")
 
@@ -236,11 +253,8 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 img_buf.seek(0)
                 return img_buf
 
-            # 호출 및 상태 저장
-            if "wordcloud_image" not in st.session_state:
-                st.session_state.wordcloud_image = generate_wordcloud_image(response)
+            st.session_state.wordcloud_image = generate_wordcloud_image(response)
 
-            st.image(st.session_state.wordcloud_image)
         except Exception as e:
             st.error(f"워드 클라우드 생성 중 오류 발생: {e}")
 
