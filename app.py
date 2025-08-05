@@ -7,6 +7,9 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import ttfonts
 
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
@@ -23,6 +26,9 @@ api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
 # LLM 설정
 llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
 
+# 한글 폰트 등록
+font_path = os.path.join(os.path.dirname(__file__), "NanumGothic-Regular.ttf")
+pdfmetrics.registerFont(TTFont('NanumGothic', font_path))
 
 # 페이지 설정
 st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
@@ -169,35 +175,66 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     conn.commit()
 
     if pdf_mode:
-        # 요약
-        summarize_chain = load_summarize_chain(llm, chain_type="stuff")
-        summary = summarize_chain.run(docs)
+        try:
+            summarize_chain = load_summarize_chain(llm, chain_type="stuff")
+            summary = summarize_chain.run(docs)
 
-        st.subheader("📌 요약")
-        st.success(summary)
+            st.subheader("📌 요약")
+            st.success(summary)
 
-        # PDF 다운로드
-        pdf_buffer = BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=letter)
-        c.drawString(100, 750, response[:1000])
-        c.save()
-        pdf_out = pdf_buffer.getvalue()
+        except Exception as e:
+            st.error(f"요약 중 오류 발생: {e}")
+            summary = None
 
-        st.download_button(
-            label="답변 PDF 다운로드",
-            data=pdf_out,
-            file_name="etf_response.pdf",
-            mime="application/pdf"
-        )
+        # pdf 생성
+        try: 
+            pdf_buffer = BytesIO()
+            c = canvas.Canvas(pdf_buffer, pagesize=letter)
+            c.setFont('NanumGothic', 12)
+            textobject = c.beginText(100, 750)
+            textobject.setFont("NanumGothic", 12)
 
-        # 워드 클라우드
-        st.subheader("☁️ 워드 클라우드")
-        wordcloud = WordCloud(width=800, height=400, background_color="white").generate(response)
-        plt.figure(figsize=(10, 5))
-        plt.imshow(wordcloud, interpolation="bilinear")
-        plt.axis("off")
-        st.pyplot(plt)
+            for line in response[:2000].split('\n'):
+                textobject.textLine(line)
+            c.drawText(textobject)
+            c.save()
+            pdf_out = pdf_buffer.getvalue()
 
+            st.download_button(
+                label="답변 PDF 다운로드",
+                data=pdf_out,
+                file_name="etf_response.pdf",
+                mime="application/pdf"
+            )
+        except Exception as e:
+            st.error(f"PDF 생성 중 오류 발생: {e}")
+
+        # 워드 클라우드 
+        try: 
+            @st.cache_data
+            def generate_wordcloud_image(text):
+                wc = WordCloud(
+                    font_path=font_path,
+                    width=800,
+                    height=400,
+                    background_color="white"
+                ).generate(text)
+
+                img_buf = BytesIO()
+                wc.to_image().save(img_buf, format='PNG')
+                img_buf.seek(0)
+                return img_buf
+
+            # 호출 및 상태 저장
+            if "wordcloud" not in st.session_state:
+                st.session_state.wordcloud = generate_wordcloud_image(response)
+
+            st.image(st.session_state.wordcloud)
+        except Exception as e:
+            st.error(f"워드 클라우드 생성 중 오류 발생: {e}")
+
+
+# 좌측 fAq 
 with st.sidebar:
     st.markdown("## 📜 투자 FAQ & 가이드")
 
