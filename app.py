@@ -178,6 +178,8 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             st.subheader("📌 요약")
             st.success(summary)
 
+            response = summary
+
         except Exception as e:
             st.error(f"요약 중 오류 발생: {e}")
             summary = None
