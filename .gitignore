@@ -1,4 +1,10 @@
-.env
+# 가상환경
 .venv/
-chat_logs.db
+__pycache__/
+*.pyc
+
+# 민감 정보
 .env
+
+# 로컬 전용 파일
+chat_logs.db
