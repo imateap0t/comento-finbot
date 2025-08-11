@@ -281,30 +281,40 @@ if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
 
 if st.button("🤖 답변을 PDF로 저장", disabled=not can_export, use_container_width=True):
     try:
+        from reportlab.platypus import SimpleDocTemplate, Paragraph
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.pagesizes import A4
+
         text = st.session_state.get("last_response", "")
-        pdf_buffer = BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=letter)
-        c.setFont('NanumGothic', 12)
+        buf = BytesIO()
 
-        import textwrap
-        max_lines_per_page = 40
-        wrapped = []
-        for para in text.splitlines():
-            wrapped.extend(textwrap.wrap(para, width=90) or [""])
+        # A4 페이지 설정
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=A4,
+            leftMargin=36,
+            rightMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
 
-        textobject = c.beginText(50, 750)
-        textobject.setFont("NanumGothic", 12)
-        y = 730; line_height = 16
+        # 스타일 설정
+        styles = getSampleStyleSheet()
+        kstyle = ParagraphStyle(
+            'Korean',
+            parent=styles['Normal'],
+            fontName='NanumGothic',  # 폰트 등록 필수
+            fontSize=12,
+            leading=16,
+            wordWrap='CJK'  # 한글 줄바꿈 핵심
+        )
 
-        for i, line in enumerate(wrapped):
-            if i and i % max_lines_per_page == 0:
-                c.drawText(textobject); c.showPage()
-                textobject = c.beginText(50, 750); textobject.setFont("NanumGothic", 12)
-                y = 750
-            textobject.setTextOrigin(50, y); textobject.textLine(line); y -= line_height
+        # 줄바꿈 처리
+        text = text.replace("\n", "<br/>")
+        story = [Paragraph(text, kstyle)]
+        doc.build(story)
 
-        c.drawText(textobject); c.save()
-        st.session_state["pdf_download"] = pdf_buffer.getvalue()
+        st.session_state["pdf_download"] = buf.getvalue()
         st.toast("PDF 준비 완료 ✅")
     except Exception as e:
         st.error(f"PDF 생성 중 오류: {e}")
