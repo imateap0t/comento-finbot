@@ -68,8 +68,23 @@ st.markdown(
 )
 
 # 업로드 및 입력
-uploaded_file = st.file_uploader("📎 PDF 파일 업로드", type="pdf", label_visibility="collapsed")
+uploaded_files = st.file_uploader("PDF 여러 개 업로드", type="pdf", accept_multiple_files=True)
 st.markdown("##### 📄 PDF 파일을 업로드하면 문서 기반 응답이 활성화됩니다.")
+
+@st.cache_resource(show_spinner=False)
+def build_vs_multi(files: tuple[bytes, ...]):
+    all_docs = []
+    for raw in files:
+        h = hashlib.md5(raw).hexdigest()
+        path = f"/tmp/{h}.pdf"
+        with open(path, "wb") as f:
+            f.write(raw)
+        pages = PyPDFLoader(path).load()
+        docs = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150).split_documents(pages)
+        all_docs.extend(docs)
+    vs = FAISS.from_documents(all_docs, OpenAIEmbeddings(model="text-embedding-3-small"))
+    return vs, all_docs
+
 
 # 문서 기반 응답
 stuff_prompt = PromptTemplate(
@@ -126,41 +141,44 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
     pdf_mode, docs, retriever = False, None, None
 
-    if uploaded_file:
-        raw = uploaded_file.getvalue()
-        meta = hashlib.md5(raw).hexdigest()
-        if st.session_state.get("file_meta") != meta:
-            st.session_state["file_bytes"] = raw
-            st.session_state["file_meta"] = meta
-        file_bytes = st.session_state["file_bytes"]
-        vectorstore, file_hash, docs = build_vectorstore(file_bytes)
+    if uploaded_files:
+        raws = tuple(f.getvalue() for f in uploaded_files)
+        # 캐시 키로 쓸 결합 해시
+        combined_hash = hashlib.md5(b"".join(raws)).hexdigest()
 
-        base_retriever = vectorstore.as_retriever(search_kwargs={"k": 2, "fetch_k": 6})
-        base_retriever.search_type = "mmr"
+        try:
+            vectorstore, docs = build_vs_multi(raws)
+        except Exception as e:
+            st.error(f"PDF 처리 오류: {e}")
+            pdf_mode = False
+        else:
+            base_retriever = vectorstore.as_retriever(search_kwargs={"k": 3, "fetch_k": 12})
+            base_retriever.search_type = "mmr"
 
-        compressor = LLMChainExtractor.from_llm(llm)
-        retriever = ContextualCompressionRetriever(
-            base_compressor=compressor, base_retriever=base_retriever
-        )
-        pdf_mode = True
-        st.markdown(
-            """
-            <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
-                <strong>PDF를 바탕으로 정보를 제공합니다.</strong>
-            </div>
-            """, unsafe_allow_html=True
-        )
+            compressor = LLMChainExtractor.from_llm(llm)
+            retriever = ContextualCompressionRetriever(
+                base_compressor=compressor, base_retriever=base_retriever
+            )
+            pdf_mode = True
+            st.session_state["last_file_hash"] = combined_hash  # 요약/워클 캐시용
+            st.markdown(
+                """
+                <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
+                    <strong>PDF를 바탕으로 정보를 제공합니다.</strong>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     else:
         st.markdown(
             """
             <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
                 <strong>PDF 없이 기본적인 금융 정보를 안내합니다.</strong>
             </div>
-            """, unsafe_allow_html=True
+            """,
+            unsafe_allow_html=True,
         )
-        if "file_bytes" in st.session_state:
-            st.session_state.pop("file_bytes", None)
-            st.session_state.pop("file_meta", None)
+        st.session_state.pop("file_meta", None)
         
 
     # --- 답변 생성 ---
@@ -176,14 +194,14 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         try:
             result = qa_chain.invoke({"query": question})
             response = (result["result"] or "").strip()
-        except Exception as e:
+        except Exception:
             response = ""
 
         
         if not response:
             try:
                 rephrased = llm.predict(
-                    f"다음 질문을 문서 검색에 유리하게 한국어로 재표현해줘: {question}"
+                    f"다음 질문을 문서 검색에 유리하게 한국어로 한 문장으로 재표현해줘: {question}"
                 ).strip()
             except Exception:
                 response = question
@@ -203,12 +221,10 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
         if not response:
             try:
-                summary = summarize_once(st.session_state["last_docs"], st.session_state["last_file_hash"])
-                response = (
-                    "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
-                )
+                summary = summarize_once(docs, st.session_state.get("last_file_hash", "nohash"))
+                response = "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
             except Exception:
-                response = "문서에서 관련 내용을 찾기 어려웠습니다. 질문 표현을 바꾸거나 다른 PDF로 시도해 주세요."
+                response = "문서에서 관련 내용을 찾기 어렵습니다. 질문을 조금 더 구체화하거나 다른 PDF로 시도해 주세요."
 
     else:
         prompt = PromptTemplate.from_template("""
