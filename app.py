@@ -8,7 +8,7 @@ from io import BytesIO
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-from wordcloud import WordCloud
+from wordcloud import WordCloud, STOPWORDS
 import matplotlib.pyplot as plt
 import threading
 from reportlab.pdfbase import pdfmetrics
@@ -68,15 +68,8 @@ st.markdown(
 )
 
 # 업로드 및 입력
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    uploaded_file = st.file_uploader("📎 PDF 파일 업로드", type="pdf", label_visibility="collapsed")
-    st.markdown("##### 📄 PDF 파일을 업로드하면 문서 기반 응답이 활성화됩니다.")
-
-with col2:
-    use_summary = st.toggle("요약만 보기")
-
+uploaded_file = st.file_uploader("📎 PDF 파일 업로드", type="pdf", label_visibility="collapsed")
+st.markdown("##### 📄 PDF 파일을 업로드하면 문서 기반 응답이 활성화됩니다.")
 
 # 문서 기반 응답
 stuff_prompt = PromptTemplate(
@@ -134,14 +127,15 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     pdf_mode, docs, retriever = False, None, None
 
     if uploaded_file:
-        meta = (uploaded_file.name, uploaded_file.size)
+        raw = uploaded_file.getvalue()
+        meta = hashlib.md5(raw).hexdigest()
         if st.session_state.get("file_meta") != meta:
-            st.session_state["file_bytes"] = uploaded_file.read()
+            st.session_state["file_bytes"] = raw
             st.session_state["file_meta"] = meta
         file_bytes = st.session_state["file_bytes"]
         vectorstore, file_hash, docs = build_vectorstore(file_bytes)
 
-        base_retriever = vectorstore.as_retriever(search_kwargs={"k": 3, "fetch_k": 6})
+        base_retriever = vectorstore.as_retriever(search_kwargs={"k": 2, "fetch_k": 6})
         base_retriever.search_type = "mmr"
 
         compressor = LLMChainExtractor.from_llm(llm)
@@ -165,7 +159,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             """, unsafe_allow_html=True
         )
         if "file_bytes" in st.session_state:
-            st.session_state.pop("file_bytes")
+            st.session_state.pop("file_bytes", None)
             st.session_state.pop("file_meta", None)
         
 
@@ -178,8 +172,11 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             chain_type_kwargs={"prompt": stuff_prompt},
             return_source_documents=False,
         )
-        result = qa_chain.invoke({"query": question})
-        response = result["result"]
+        try:
+            result = qa_chain.invoke({"query": question})
+            response = (result["result"] or "").strip() or "문서에서 관련 내용을 찾지 못했습니다."
+        except Exception as e:
+            response = f"처리 중 오류가 발생했습니다: {e}"
     else:
         prompt = PromptTemplate.from_template("""
             너는 금융투자 분야에 특화된 AI야.
@@ -262,19 +259,39 @@ if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
     @st.cache_data(show_spinner=False)
     def summarize_once(_docs, _hash):
         _ = str(_hash)
-        chain = load_summarize_chain(llm, chain_type="map_reduce")
+        map_prompt = PromptTemplate(
+            input_variables=["text"],
+            template=(
+                "다음 텍스트의 핵심을 한국어로 3~5개 불릿으로 요약하라.\n"
+                "- 수치/위험요소는 구체적으로\n"
+                "- 과도한 확정 표현 금지\n\n{text}\n\n요약:"
+            ),
+        )
+        combine_prompt = PromptTemplate(
+            input_variables=["text"],
+            template=(
+                "아래 요약들을 한국어 단락 3~5문장으로 자연스럽게 통합하라. "
+                "중복 제거하고 핵심만 남겨라.\n\n{text}\n\n최종 요약:"
+            ),
+        )
+        chain = load_summarize_chain(
+            llm, chain_type="map_reduce",
+            map_prompt=map_prompt, combine_prompt=combine_prompt
+        )
         return chain.run(_docs)
 
     summary = summarize_once(st.session_state["last_docs"], st.session_state["last_file_hash"])
     st.success(summary)
 
     @st.cache_data(show_spinner=False)
-    def generate_wordcloud_image_cached(text, _hash):
+    def generate_wordcloud_image_cached(text:str, _hash:str):
         _ = str(_hash)
-        wc = WordCloud(font_path=font_path, width=800, height=400, background_color="white").generate(text)
+        stop = set(STOPWORDS) | {"https","http","www","com"}
+        wc = WordCloud(font_path=font_path, width=800, height=400, background_color="white", collocations=False, stopwords=stop).generate(text)
         buf = BytesIO(); wc.to_image().save(buf, format='PNG'); buf.seek(0); return buf
 
-    st.image(generate_wordcloud_image_cached(summary, st.session_state["last_file_hash"]))
+    hash_key = st.session_state.get("last_file_hash", "nohash")
+    st.image(generate_wordcloud_image_cached(summary, hash_key), use_container_width=True)
 
 
 
