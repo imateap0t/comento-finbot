@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import streamlit as st
-import sqlite3
+import sqlite3, textwrap
 from dotenv import load_dotenv
 import os
 from io import BytesIO
@@ -10,6 +10,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import threading
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import ttfonts
@@ -134,7 +135,11 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     pdf_mode, docs, retriever = False, None, None
 
     if uploaded_file:
-        file_bytes = uploaded_file.read()  # 한 번만
+        meta = (uploaded_file.name, uploaded_file.size)
+        if st.session_state.get("file_meta") != meta:
+            st.session_state["file_bytes"] = uploaded_file.read()
+            st.session_state["file_meta"] = meta
+        file_bytes = st.session_state["file_bytes"]
         vectorstore, file_hash, docs = build_vectorstore(file_bytes)
 
         base_retriever = vectorstore.as_retriever(search_kwargs={"k": 3, "fetch_k": 6})
@@ -160,6 +165,10 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             </div>
             """, unsafe_allow_html=True
         )
+        if "file_bytes" in st.session_state:
+            st.session_state.pop("file_bytes")
+            st.session_state.pop("file_meta", None)
+        
 
     # --- 답변 생성 ---
     if pdf_mode:
@@ -181,6 +190,14 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         """)
         response = llm.predict(prompt.format(question=question))
 
+    # 세션에 저장 + 이전 PDF 초기화
+    st.session_state["last_response"] = response
+    st.session_state["last_docs"] = docs
+    st.session_state["last_file_hash"] = file_hash if pdf_mode else None
+    st.session_state.pop("pdf_download", None) # 새로운 질문마다 이전 pdf 제거
+
+
+
     # --- 한 번만 출력 ---
     with st.chat_message("assistant"):
         st.markdown(response)
@@ -200,65 +217,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             conn.commit(); conn.close()
         threading.Thread(target=_w, daemon=True).start()
     log_async(question, response)
-
-    # --- 요약/워드클라우드 ---
-    @st.cache_data(show_spinner=False)
-    def summarize_once(_docs, _hash):
-        # _hash를 강제로 읽어 캐시 키로 사용
-        _ = str(_hash)
-        chain = load_summarize_chain(llm, chain_type="map_reduce")
-        return chain.run(_docs)
-
-    if do_post and pdf_mode:
-        summary = summarize_once(docs, file_hash)
-        st.success(summary)
-
-        @st.cache_data(show_spinner=False)
-        def generate_wordcloud_image_cached(text, _hash):
-            _ = str(_hash)
-            wc = WordCloud(font_path=font_path, width=800, height=400, background_color="white").generate(text)
-            buf = BytesIO(); wc.to_image().save(buf, format='PNG'); buf.seek(0); return buf
-        st.image(generate_wordcloud_image_cached(summary, file_hash))
-
-    # --- PDF 저장 버튼(중복 요약 제거, response만 PDF로) ---
-    if st.button("🤖 답변을 PDF로 저장"):
-        try:
-            pdf_buffer = BytesIO()
-            c = canvas.Canvas(pdf_buffer, pagesize=letter)
-            c.setFont('NanumGothic', 12)
-
-            max_chars_per_line = 90
-            max_lines_per_page = 40
-
-            textobject = c.beginText(50, 750)
-            textobject.setFont("NanumGothic", 12)
-
-            lines = []
-            for paragraph in response.split('\n'):
-                while len(paragraph) > max_chars_per_line:
-                    lines.append(paragraph[:max_chars_per_line])
-                    paragraph = paragraph[max_chars_per_line:]
-                lines.append(paragraph)
-
-            line_height = 16
-            y = 730
-            for i, line in enumerate(lines):
-                if i and i % max_lines_per_page == 0:
-                    c.drawText(textobject); c.showPage()
-                    textobject = c.beginText(50, 750); textobject.setFont("NanumGothic", 12)
-                    y = 750
-                textobject.setTextOrigin(50, y); textobject.textLine(line); y -= line_height
-
-            c.drawText(textobject); c.save()
-            st.session_state.pdf_download = pdf_buffer.getvalue()
-        except Exception as e:
-            st.error(f"PDF 생성 중 오류 발생: {e}")
-
-    # --- 다운로드 링크/이미지 ---
-    if "pdf_download" in st.session_state:
-        b64 = base64.b64encode(st.session_state["pdf_download"]).decode()
-        st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="etf_response.pdf">📄 답변 PDF 다운로드</a>', unsafe_allow_html=True)
-
 
 
 # 좌측 fAq 
@@ -297,3 +255,67 @@ with st.sidebar:
         단기 시세 변동에 흔들리지 않고 일정 기간 이상 보유하여 수익을 기대하는 전략입니다.
         """)
 
+
+# --- 항상 렌더 (PDF 생성/다운로드)---
+can_export = bool(st.session_state.get("last_response"))
+
+if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
+    @st.cache_data(show_spinner=False)
+    def summarize_once(_docs, _hash):
+        _ = str(_hash)
+        chain = load_summarize_chain(llm, chain_type="map_reduce")
+        return chain.run(_docs)
+
+    summary = summarize_once(st.session_state["last_docs"], st.session_state["last_file_hash"])
+    st.success(summary)
+
+    @st.cache_data(show_spinner=False)
+    def generate_wordcloud_image_cached(text, _hash):
+        _ = str(_hash)
+        wc = WordCloud(font_path=font_path, width=800, height=400, background_color="white").generate(text)
+        buf = BytesIO(); wc.to_image().save(buf, format='PNG'); buf.seek(0); return buf
+
+    st.image(generate_wordcloud_image_cached(summary, st.session_state["last_file_hash"]))
+
+
+
+if st.button("🤖 답변을 PDF로 저장", disabled=not can_export, use_container_width=True):
+    try:
+        text = st.session_state.get("last_response", "")
+        pdf_buffer = BytesIO()
+        c = canvas.Canvas(pdf_buffer, pagesize=letter)
+        c.setFont('NanumGothic', 12)
+
+        import textwrap
+        max_lines_per_page = 40
+        wrapped = []
+        for para in text.splitlines():
+            wrapped.extend(textwrap.wrap(para, width=90) or [""])
+
+        textobject = c.beginText(50, 750)
+        textobject.setFont("NanumGothic", 12)
+        y = 730; line_height = 16
+
+        for i, line in enumerate(wrapped):
+            if i and i % max_lines_per_page == 0:
+                c.drawText(textobject); c.showPage()
+                textobject = c.beginText(50, 750); textobject.setFont("NanumGothic", 12)
+                y = 750
+            textobject.setTextOrigin(50, y); textobject.textLine(line); y -= line_height
+
+        c.drawText(textobject); c.save()
+        st.session_state["pdf_download"] = pdf_buffer.getvalue()
+        st.toast("PDF 준비 완료 ✅")
+    except Exception as e:
+        st.error(f"PDF 생성 중 오류: {e}")
+
+pdf_bytes = st.session_state.get("pdf_download")
+if pdf_bytes:
+    st.download_button(
+        "📄 PDF 다운로드",
+        data=pdf_bytes,
+        file_name="etf_response.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        type="primary",
+    )
