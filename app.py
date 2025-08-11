@@ -172,11 +172,44 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             chain_type_kwargs={"prompt": stuff_prompt},
             return_source_documents=False,
         )
+
         try:
             result = qa_chain.invoke({"query": question})
-            response = (result["result"] or "").strip() or "문서에서 관련 내용을 찾지 못했습니다."
+            response = (result["result"] or "").strip()
         except Exception as e:
-            response = f"처리 중 오류가 발생했습니다: {e}"
+            response = ""
+
+        
+        if not response:
+            try:
+                rephrased = llm.predict(
+                    f"다음 질문을 문서 검색에 유리하게 한국어로 재표현해줘: {question}"
+                ).strip()
+            except Exception:
+                response = question
+
+        qa_chain_loose = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=base_retriever,
+            chain_type_kwargs={"prompt": stuff_prompt},
+            return_source_documents=False,
+        )
+        try:
+            result2 = qa_chain_loose.invoke({"query": rephrased})
+            response = (result2["result"] or "").strip()
+        except Exception:
+            response = ""
+
+        if not response:
+            try:
+                summary = summarize_once(st.session_state["last_docs"], st.session_state["last_file_hash"])
+                response = (
+                    "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
+                )
+            except Exception:
+                response = "문서에서 관련 내용을 찾기 어려웠습니다. 질문 표현을 바꾸거나 다른 PDF로 시도해 주세요."
+
     else:
         prompt = PromptTemplate.from_template("""
             너는 금융투자 분야에 특화된 AI야.
