@@ -79,19 +79,18 @@ with col2:
 
 
 # 문서 기반 응답
-custom_prompt = PromptTemplate.from_template("""
-    너는 한국어로 응답하는 금융 전문가야.
-    문서 기반 질문에 대해 아래 기준으로 답변해줘:
-                                        
-    1. 질문을 충분히 이해한 후 문서 내용을 바탕으로 신뢰성 있는 정보 제공
-    2. 초보자도 이해할 수 있게 설명
-    3. 반드시 한국어로 응답
-    4. 수치, 전략, 위험 요소 등을 구체적으로 포함
-
-질문: {question}
----
-답변:
-""")
+stuff_prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template=(
+        "너는 한국어 금융 전문가다. 아래 컨텍스트를 근거로 간결하고 정확히 답해줘.\n"
+        "- 초보자도 이해 가능하게 설명\n"
+        "- 수치/전략/위험요소는 구체적으로\n"
+        "- 모르면 모른다고 답하기\n\n"
+        "컨텍스트:\n{context}\n\n"
+        "질문: {question}\n"
+        "답변:"
+    ),
+)
 
 
 # --- 초기화 ---
@@ -174,9 +173,9 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     if pdf_mode:
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
-            chain_type="map_reduce",
+            chain_type="stuff",
             retriever=retriever,
-            chain_type_kwargs={"prompt": custom_prompt},
+            chain_type_kwargs={"prompt": stuff_prompt},
             return_source_documents=False,
         )
         result = qa_chain.invoke({"query": question})
@@ -303,10 +302,10 @@ if st.button("🤖 답변을 PDF로 저장", disabled=not can_export, use_contai
         kstyle = ParagraphStyle(
             'Korean',
             parent=styles['Normal'],
-            fontName='NanumGothic',  # 폰트 등록 필수
+            fontName='NanumGothic',
             fontSize=12,
             leading=16,
-            wordWrap='CJK'  # 한글 줄바꿈 핵심
+            wordWrap='CJK'
         )
 
         # 줄바꿈 처리
@@ -317,7 +316,7 @@ if st.button("🤖 답변을 PDF로 저장", disabled=not can_export, use_contai
         st.session_state["pdf_download"] = buf.getvalue()
         st.toast("PDF 준비 완료 ✅")
     except Exception as e:
-        st.error(f"PDF 생성 중 오류: {e}")
+        st.error(f"처리 중 오류가 발생했습니다: {e}")
 
 pdf_bytes = st.session_state.get("pdf_download")
 if pdf_bytes:
