@@ -13,10 +13,12 @@ from langchain.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.retrievers import BM25Retriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers import EnsembleRetriever
 
 # ====== PDF/시각화 ======
 from reportlab.pdfbase import pdfmetrics
@@ -153,6 +155,23 @@ def summarize_once(_docs, _hash):
     chain = load_summarize_chain(llm, chain_type="map_reduce", map_prompt=map_prompt, combine_prompt=combine_prompt)
     return chain.run(_docs)
 
+# ====== 스트리밍 콜백 핸들러 =======
+class StreamHandler(BaseCallbackHandler):
+    def __init__(self, container):
+        self.container = container
+        self.text = ""
+    def on_llm_start(self, *args, **kwargs):
+        self.text = ""
+        if self.container:
+            self.container.markdown("")
+    def on_llm_new_token(self, token: str, **kwargs):
+        self.text += token
+        if self.container:
+            self.container.markdown(self.text)
+    def on_llm_end(self, *args, **kwargs):
+        pass
+
+
 # ====== 과거 메시지 렌더 ======
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -160,6 +179,8 @@ for m in st.session_state.messages:
 
 # 토글
 do_post = st.toggle("요약/이미지 생성 켜기", key="do_postprocess", value=False)
+# 스트리밍 출력 토글
+stream_on = st.toggle("실시간 스트리밍", key="do_stream", value=True)
 
 # ====== 워드클라우드 ======
 @st.cache_data(show_spinner=False)
@@ -178,6 +199,11 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         st.markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
 
+    # 화면 자리 + 콜백
+    live_area = st.empty()
+    handler = StreamHandler(live_area) if st.session_state.get("do_stream", False) else None
+    cfg = {"callbacks": [handler]} if handler else {}
+
     st.session_state["last_sources"] = []
 
     pdf_mode, docs, retriever, base_retriever = False, None, None, None
@@ -193,11 +219,16 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             st.error(f"PDF 처리 오류: {e}")
             pdf_mode = False
         else:
-            base_retriever = vectorstore.as_retriever(search_kwargs={"k": 3, "fetch_k": 12}, search_type="mmr")
+            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3, "fetch_k": 12})
+            bm25 = BM25Retriever.from_documents(docs)
+            ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
+
             compressor = LLMChainExtractor.from_llm(llm)
-            retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
+            retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=ensemble)
+
+            base_retriever = dense
             pdf_mode = True
-            st.session_state["last_file_hash"] = combined_hash
+            st.session_state["last_file_hash"] = combined_hash  # ✅ 실제 해시 저장
             st.markdown(
                 """
                 <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
@@ -216,6 +247,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             unsafe_allow_html=True,
         )
         st.session_state.pop("file_meta", None)
+
 
     # ====== 답변 생성 ======
     if pdf_mode and retriever:
@@ -291,7 +323,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             """
         )
         try:
-            r = llm.invoke(prompt.format(question=question))
+            r = llm.invoke(prompt.format(question=question), config=cfg)
             response = getattr(r, "content", str(r))
         except Exception as e:
             response = f"응답 생성 중 오류가 발생했습니다: {e}"
@@ -300,9 +332,15 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     st.session_state["last_response"] = response
     st.session_state["last_docs"] = docs
 
+    try:
+        if handler:
+            live_area.empty()
+    except Exception:
+        pass
+
     with st.chat_message("assistant"):
         st.markdown(response)
-    # 근거 문서 표시 (있을 때만)
+    # 문서 표시 (있을 때만)
         if st.session_state.get("last_sources"):
             with st.expander("🔎 근거 문서"):
                 for i, s in enumerate(st.session_state["last_sources"], 1):
@@ -375,10 +413,7 @@ with st.sidebar:
 can_export = bool(st.session_state.get("last_response"))
 
 if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
-    summary = summarize_once(
-        st.session_state["last_docs"], 
-        st.session_state.get("last_file_hash", "nohash")
-    )
+    summary = summarize_once(st.session_state["last_docs"], st.session_state.get("last_file_hash", "nohash"))
     st.success(summary)
 
     hash_key = st.session_state.get("last_file_hash", "nohash")
