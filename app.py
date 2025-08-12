@@ -1,6 +1,7 @@
 import hashlib
 import os
 import sqlite3
+import time
 from io import BytesIO
 
 import streamlit as st
@@ -45,7 +46,7 @@ st.markdown("금융에 대해 무엇이든 물어보세요!")
 font_path = os.path.join(os.path.dirname(__file__), "NanumGothic-Regular.ttf")
 pdfmetrics.registerFont(TTFont("NanumGothic", font_path))
 
-# 간단 CSS
+# CSS
 st.markdown(
     """
     <style>
@@ -74,7 +75,7 @@ def build_vs_multi(
     chunk_overlap: int = 150,
     embed_model: str = "text-embedding-3-small",
 ):
-    # 캐시 키 안정화: 파일 해시 + 파라미터
+    # 캐시 키 안정화
     _ = (chunk_size, chunk_overlap, embed_model, tuple(hashlib.md5(b).hexdigest() for b in files))
 
     all_docs = []
@@ -177,6 +178,8 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         st.markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
 
+    st.session_state["last_sources"] = []
+
     pdf_mode, docs, retriever, base_retriever = False, None, None, None
 
     if uploaded_files:
@@ -221,15 +224,36 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             chain_type="stuff",
             retriever=retriever,
             chain_type_kwargs={"prompt": stuff_prompt},
-            return_source_documents=False,
+            return_source_documents=True,
         )
 
         response = ""
+        sources = []
         try:
-            result = qa_chain.invoke({"query": question})
-            response = (result.get("result") or "").strip()
+            res = qa_chain.invoke({"query": question})
+            response = (res.get("result") or "").strip()
+            sources = res.get("source_documents", []) or []
         except Exception:
             response = ""
+            sources = []
+
+        # 소스 전처리 후 세션 저장
+        processed_sources = []
+        _seen = set()
+        for d in sources:
+            src_name = d.metadata.get("source_file") or os.path.basename(d.metadata.get("source", "?"))
+            pg = d.metadata.get("page")
+            pg_num = (pg + 1) if isinstance(pg, int) else "?"  # PyPDFLoader는 0-index일 수 있음
+            key = (src_name, pg_num)
+            if key in _seen:
+                continue
+            _seen.add(key)
+            snippet = (d.page_content or "").strip()
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "…"
+            processed_sources.append({"file": src_name, "page": pg_num, "snippet": snippet})
+
+        st.session_state["last_sources"] = processed_sources
 
         if not response:
             try:
@@ -243,7 +267,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 chain_type="stuff",
                 retriever=base_retriever if base_retriever else retriever,
                 chain_type_kwargs={"prompt": stuff_prompt},
-                return_source_documents=False,
+                return_source_documents=True,
             )
             try:
                 result2 = qa_chain_loose.invoke({"query": rephrased or question})
@@ -257,7 +281,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
             except Exception:
                 response = "문서에서 관련 내용을 찾기 어렵습니다. 질문을 조금 더 구체화하거나 다른 PDF로 시도해 주세요."
-
     else:
         prompt = PromptTemplate.from_template(
             """
@@ -279,8 +302,14 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
     with st.chat_message("assistant"):
         st.markdown(response)
+    # 근거 문서 표시 (있을 때만)
+        if st.session_state.get("last_sources"):
+            with st.expander("🔎 근거 문서"):
+                for i, s in enumerate(st.session_state["last_sources"], 1):
+                    st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
+                    st.code(s["snippet"])
     st.session_state.messages.append({"role": "assistant", "content": response})
-
+    
     # 비동기 로그 저장
     import threading
 
@@ -346,7 +375,10 @@ with st.sidebar:
 can_export = bool(st.session_state.get("last_response"))
 
 if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
-    summary = summarize_once(st.session_state["last_docs"], st.session_state.get("last_file_hash", "nohash"))
+    summary = summarize_once(
+        st.session_state["last_docs"], 
+        st.session_state.get("last_file_hash", "nohash")
+    )
     st.success(summary)
 
     hash_key = st.session_state.get("last_file_hash", "nohash")
