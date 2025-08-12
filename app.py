@@ -263,7 +263,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         response = ""
         sources = []
         try:
-            res = qa_chain.invoke({"query": question})
+            res = qa_chain.invoke({"query": question}, config=cfg)
             response = (res.get("result") or "").strip()
             sources = res.get("source_documents", []) or []
         except Exception:
@@ -303,7 +303,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 return_source_documents=True,
             )
             try:
-                result2 = qa_chain_loose.invoke({"query": rephrased or question})
+                result2 = qa_chain_loose.invoke({"query": rephrased or question}, config=cfg)
                 response = (result2.get("result") or "").strip()
             except Exception:
                 response = ""
