@@ -78,7 +78,7 @@ def build_vs_multi(
     chunk_overlap: int = 150,
     embed_model: str = "text-embedding-3-small",
 ):
-    # 캐시 키 안정화
+    # 캐시 키 안정화: 파일 해시 + 파라미터
     _ = (chunk_size, chunk_overlap, embed_model, tuple(hashlib.md5(b).hexdigest() for b in files))
 
     all_docs = []
@@ -214,12 +214,15 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         names = tuple(f.name for f in uploaded_files if f is not None)
         combined_hash = hashlib.md5(b"".join(raws)).hexdigest() if raws else "nohash"
 
+        pdf_mode, docs, retriever, base_retriever = False, None, None, None
+
         try:
             vectorstore, docs = build_vs_multi(raws, names, chunk_size=1000, chunk_overlap=150, embed_model="text-embedding-3-small")
         except Exception as e:
             st.error(f"PDF 처리 오류: {e}")
             pdf_mode = False
         else:
+            # Dense(임베딩) + Keyword(BM25) 하이브리드
             dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3, "fetch_k": 12})
             bm25 = BM25Retriever.from_documents(docs)
             ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
@@ -229,7 +232,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
             base_retriever = dense
             pdf_mode = True
-            st.session_state["last_file_hash"] = combined_hash  # ✅ 실제 해시 저장
+            st.session_state["last_file_hash"] = combined_hash
             st.markdown(
                 """
                 <div style="background-color:#3E3B16;padding:10px;border-radius:5px;border-left:5px solid #FFD700;">
@@ -276,7 +279,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         for d in sources:
             src_name = d.metadata.get("source_file") or os.path.basename(d.metadata.get("source", "?"))
             pg = d.metadata.get("page")
-            pg_num = (pg + 1) if isinstance(pg, int) else "?"  # PyPDFLoader는 0-index일 수 있음
+            pg_num = (pg + 1) if isinstance(pg, int) else "?"  # PyPDFLoader는 0-index 가능성
             key = (src_name, pg_num)
             if key in _seen:
                 continue
@@ -287,6 +290,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             processed_sources.append({"file": src_name, "page": pg_num, "snippet": snippet})
 
         st.session_state["last_sources"] = processed_sources
+
 
         if not response:
             try:
@@ -314,6 +318,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
             except Exception:
                 response = "문서에서 관련 내용을 찾기 어렵습니다. 질문을 조금 더 구체화하거나 다른 PDF로 시도해 주세요."
+
     else:
         prompt = PromptTemplate.from_template(
             """
@@ -341,36 +346,37 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
     with st.chat_message("assistant"):
         st.markdown(response)
-    # 문서 표시 (있을 때만)
+        # 문서 표시 (있을 때만)
         if st.session_state.get("last_sources"):
-            with st.expander("🔎 근거 문서"):
+            with st.expander("🔎 참고 문서"):
                 for i, s in enumerate(st.session_state["last_sources"], 1):
                     st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
                     st.code(s["snippet"])
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
     
-    # 비동기 로그 저장
-    import threading
+        # 비동기 로그 저장
+        import threading
 
-    def log_async(q, a):
-        def _w():
-            conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chat_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    question TEXT, answer TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        def log_async(q, a):
+            def _w():
+                conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        question TEXT, answer TEXT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
                 )
-                """
-            )
-            cur.execute("INSERT INTO chat_logs (question, answer) VALUES (?,?)", (q, a))
-            conn.commit()
-            conn.close()
-        threading.Thread(target=_w, daemon=True).start()
+                cur.execute("INSERT INTO chat_logs (question, answer) VALUES (?,?)", (q, a))
+                conn.commit()
+                conn.close()
+            threading.Thread(target=_w, daemon=True).start()
 
-    log_async(question, response)
+        log_async(question, response)
 
 # ====== 사이드바 ======
 with st.sidebar:
