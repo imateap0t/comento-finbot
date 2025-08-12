@@ -18,6 +18,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers import ContextualCompressionRetriever
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain.retrievers import EnsembleRetriever
 
 # ====== PDF/시각화 ======
