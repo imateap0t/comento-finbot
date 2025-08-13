@@ -156,6 +156,7 @@ def build_vs_multi(
                 st.error("OpenAI API 호출 중 오류가 발생했습니다. API 키와 네트워크를 확인해주세요.")
             raise e
         
+        return vs, all_docs
 
     finally:
         # 임시파일 정리
@@ -225,20 +226,68 @@ for m in st.session_state.messages:
         st.markdown(m["content"])
 
 # 토글
-do_post = st.toggle("요약/이미지 생성 켜기", key="do_postprocess", value=False)
-# 스트리밍 출력 토글
-stream_on = st.toggle("실시간 스트리밍", key="do_stream", value=True)
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("⚙️ 추가 기능")
+    
+    # 요약/이미지 생성 토글
+    do_post = st.toggle(
+        "📊 요약/워드클라우드 자동 생성", 
+        key="do_postprocess", 
+        value=False,
+        help="PDF 문서가 업로드된 상태에서 답변 시 자동으로 문서 요약과 워드클라우드를 생성합니다."
+    )
+    
+    # 스트리밍 출력 토글
+    stream_on = st.toggle(
+        "⚡ 실시간 스트리밍", 
+        key="do_stream", 
+        value=True,
+        help="답변을 실시간으로 표시합니다. 끄면 완성된 답변을 한 번에 보여줍니다."
+    )
+    
+    # 토글 상태 표시
+    if do_post:
+        if st.session_state.get("last_docs"):
+            st.success("✅ 다음 답변부터 요약/워드클라우드가 생성됩니다")
+        else:
+            st.info("ℹ️ PDF를 업로드하고 질문하면 요약/워드클라우드가 생성됩니다")
 
 # ====== 워드클라우드 ======
 @st.cache_data(show_spinner=False)
 def generate_wordcloud_image_cached(text: str, _hash: str):
+    """워드클라우드 이미지 생성 (캐시됨)"""
     _ = str(_hash)
-    stop = set(STOPWORDS) | {"https", "http", "www", "com"}
-    wc = WordCloud(font_path=font_path, width=800, height=400, background_color="white", collocations=False, stopwords=stop).generate(text)
-    buf = BytesIO()
-    wc.to_image().save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    
+    # 한글 불용어 확장
+    korean_stopwords = {
+        "그리고", "하지만", "그러나", "또한", "따라서", "그래서", "즉", "예를 들어",
+        "있습니다", "입니다", "합니다", "됩니다", "것입니다", "수", "때", "등", "통해",
+        "대한", "위한", "관련", "경우", "방법", "이런", "그런", "이와", "같은"
+    }
+    
+    stop = set(STOPWORDS) | {"https", "http", "www", "com"} | korean_stopwords
+
+    try:
+        wc = WordCloud(
+            font_path=font_path, 
+            width=800, 
+            height=400, 
+            background_color="white", 
+            collocations=False, 
+            stopwords=stop,
+            max_words=100,
+            colormap='viridis'
+        ).generate(text)
+        
+        buf = BytesIO()
+        wc.to_image().save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+        
+    except Exception as e:
+        st.error(f"워드클라우드 생성 중 오류: {e}")
+        return None
 
 # ====== 메인 입력 ======
 if question := st.chat_input("무엇을 도와드릴까요?"):
@@ -415,9 +464,57 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = f"죄송합니다. 일시적인 오류로 답변을 생성할 수 없습니다. 다시 시도해주세요."
                 st.error(f"응답 생성 오류: {e}")
 
+with st.chat_message("assistant"):
+    st.markdown(response)
+    
+    # 문서 표시 (있을 때만)
+    if st.session_state.get("last_sources"):
+        with st.expander("🔎 참고 문서"):
+            for i, s in enumerate(st.session_state["last_sources"], 1):
+                st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
+                st.code(s["snippet"])
+
+    # ====== 실시간 요약/워드클라우드 생성 ======
+    if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
+        st.markdown("---")
+        st.subheader("📊 문서 요약 및 시각화")
+        
+        try:
+            with st.spinner("📝 문서를 요약하고 있습니다..."):
+                summary = summarize_once(
+                    st.session_state["last_docs"], 
+                    st.session_state.get("last_file_hash", "nohash")
+                )
+            
+            # 요약 표시
+            st.success("**📋 문서 요약:**")
+            st.info(summary)
+
+            # 워드클라우드 생성
+            try:
+                with st.spinner("🎨 워드클라우드를 생성하고 있습니다..."):
+                    hash_key = st.session_state.get("last_file_hash", "nohash")
+                    wordcloud_img = generate_wordcloud_image_cached(summary, hash_key)
+                
+                st.success("**☁️ 키워드 클라우드:**")
+                st.image(wordcloud_img, use_container_width=True, caption="문서의 주요 키워드")
+                
+            except Exception as e:
+                st.warning(f"워드클라우드 생성 실패: {e}")
+                
+        except Exception as e:
+            st.error(f"요약 생성 실패: {e}")
+    
+    st.session_state.messages.append({"role": "assistant", "content": response})
+
+
     # ====== 렌더 & 세션 저장 ======
     st.session_state["last_response"] = response
-    st.session_state["last_docs"] = docs
+    if pdf_mode and docs:
+        st.session_state["last_docs"] = docs
+        st.session_state["last_file_hash"] = combined_hash
+    else:
+        st.session_state.pop("last_docs", None)
 
     try:
         if handler:
@@ -527,14 +624,6 @@ with st.sidebar:
                 )
 
 # ====== 포스트프로세싱 위젯 ======
-can_export = bool(st.session_state.get("last_response"))
-
-if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
-    summary = summarize_once(st.session_state["last_docs"], st.session_state.get("last_file_hash", "nohash"))
-    st.success(summary)
-
-    hash_key = st.session_state.get("last_file_hash", "nohash")
-    st.image(generate_wordcloud_image_cached(summary, hash_key), use_container_width=True)
 
 # ====== PDF 저장 ======
 if st.button("🤖 답변을 PDF로 저장", disabled=not can_export, use_container_width=True):
