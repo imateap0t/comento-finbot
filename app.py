@@ -98,8 +98,8 @@ st.markdown("##### 📄 PDF 파일을 업로드하면 문서 기반 응답이 �
 def build_vs_multi(
     files: tuple[bytes, ...],
     file_names: tuple[str, ...],
-    chunk_size: int = 1000,
-    chunk_overlap: int = 150,
+    chunk_size: int = 800,
+    chunk_overlap: int = 200,
     embed_model: str = "text-embedding-3-small",
 ):
     # 캐시 키 안정화: 파일 해시 + 파라미터
@@ -124,9 +124,10 @@ def build_vs_multi(
                     st.warning(f"⚠️ '{fname}': 문서가 비어있습니다.")
                     continue
                 total_text = "".join(page.page_content for page in pages)
-                if len(total_text.strip()) < 50:
+                if len(total_text.strip()) < 30:
                     st.warning(f"⚠️ '{fname}': 텍스트 추출이 어렵습니다.")
                     continue
+
 
             except Exception as e:
                 error_msg = str(e).lower()
@@ -358,14 +359,14 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             pdf_mode = False
         else:
             # Dense(임베딩) 검색 설정
-            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3, "fetch_k": 12})
+            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 7, "fetch_k": 25, "lambda_mult": 0.5})
             
             # BM25 사용 가능 여부 확인 및 조건부 사용
             try:
                 from langchain_community.retrievers import BM25Retriever
                 bm25 = BM25Retriever.from_documents(docs)
-                ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
-                st.success("🔍 하이브리드 검색 (Dense + BM25) 활성화")
+                ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.4, 0.6])
+                st.success("🔍 하이브리드 검색 활성화")
             except ImportError:
                 # BM25 라이브러리가 없는 경우
                 ensemble = dense
@@ -470,10 +471,25 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
         if not response:
             try:
-                r = llm.invoke(f"다음 질문을 문서 검색에 유리하게 한국어로 한 문장으로 재표현해줘: {question}")
-                rephrased = getattr(r, "content", str(r)).strip()
+                rephrase_prompts = [
+                    f"다음 질문의 핵심 키워드만 추출해줘: {question}",
+                    f"다음 질문을 더 간단하게 바꿔줘: {question}",
+                    f"다음 질문과 관련된 다른 표현들을 알려줘: {question}"
+                ]
+                
+                for prompt in rephrase_prompts:
+                    r = llm.invoke(prompt)
+                    rephrased = getattr(r, "content", str(r)).strip()
+                    
+                    result2 = qa_chain_loose.invoke({"query": rephrased}, config=cfg)
+                    test_response = (result2.get("result") or "").strip()
+                    
+                    if test_response and "모른다" not in test_response and len(test_response) > 50:
+                        response = test_response
+                        break
+                        
             except Exception:
-                rephrased = question
+                pass
 
             qa_chain_loose = RetrievalQA.from_chain_type(
                 llm=llm,
@@ -490,20 +506,37 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
         if not response:
             try:
-                summary = summarize_once(docs, st.session_state.get("last_file_hash", "nohash"))
-                response = "문서에서 직접적인 매칭을 찾기 어려워 요약 기반으로 핵심을 정리했습니다:\n\n" + summary
+                # 질문에서 키워드 추출
+                keyword_prompt = f"다음 질문에서 가장 중요한 키워드 3개만 추출해줘 (쉼표로 구분): {question}"
+                keyword_result = llm.invoke(keyword_prompt)
+                keywords = getattr(keyword_result, "content", "").strip()
+                
+                # 키워드로 다시 검색
+                if keywords:
+                    result3 = qa_chain_loose.invoke({"query": keywords}, config=cfg)
+                    test_response = (result3.get("result") or "").strip()
+                    
+                    if test_response and "모른다" not in test_response:
+                        response = f"키워드 '{keywords}' 기반 검색 결과:\n\n{test_response}"
+                        
             except Exception:
-                response = "문서에서 관련 내용을 찾기 어렵습니다. 질문을 조금 더 구체화하거나 다른 PDF로 시도해 주세요."
-
+                pass
     else:
         prompt = PromptTemplate.from_template(
-            """
-            너는 금융투자 분야에 특화된 AI야.
-            아래 기준으로 한국어로만 간결하게 답해:
-            1) 신뢰 가능한 출처 기반  2) 초보자 용어 풀어쓰기  3) 수치/위험요소 포함
-            질문: {question}
-            """
+            input_variables=["context", "question"],
+            template=(
+                "너는 한국어 금융 전문가야. 아래 '컨텍스트'에서 관련된 정보를 찾아 답해.\n"
+                "- 한국어만 사용할 것\n"
+                "- 컨텍스트에 직접적인 답이 없어도, 관련된 내용이 있으면 그것을 바탕으로 도움이 되는 답변을 해줘\n"
+                "- 초보자도 이해 가능하게 단계적으로 설명\n"
+                "- 수치/전략/위험요소는 구체적으로(기간, 조건 포함)\n"
+                "- 추측보다는 컨텍스트 기반으로 답변하되, 유용한 일반적 정보는 포함해도 됨\n\n"
+                "컨텍스트:\n{context}\n\n"
+                "질문: {question}\n"
+                "답변:"
+            ),
         )
+
         try:
             with st.spinner("💭 답변을 생성하고 있습니다..."):
                 r = llm.invoke(prompt.format(question=question), config=cfg)
