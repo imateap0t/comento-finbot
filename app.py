@@ -2,6 +2,7 @@ import hashlib
 import os
 import sqlite3
 import time
+import threading
 from io import BytesIO
 
 import streamlit as st
@@ -219,6 +220,30 @@ class StreamHandler(BaseCallbackHandler):
     def on_llm_end(self, *args, **kwargs):
         pass
 
+def log_async(q, a):
+        """비동기로 대화 로그를 데이터베이스에 저장"""
+        def _w():
+            try:
+                conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        question TEXT, 
+                        answer TEXT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                cur.execute("INSERT INTO chat_logs (question, answer) VALUES (?,?)", (q, a))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Log save error: {e}")
+        
+        threading.Thread(target=_w, daemon=True).start()
+
 
 # ====== 과거 메시지 렌더 ======
 for m in st.session_state.messages:
@@ -301,7 +326,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     cfg = {"callbacks": [handler]} if handler else {}
 
     st.session_state["last_sources"] = []
-
     pdf_mode, docs, retriever, base_retriever = False, None, None, None
 
     if uploaded_files:
@@ -393,6 +417,20 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = "죄송합니다. 일시적인 오류가 발생했습니다."
             sources = []
 
+        # ====== 렌더 & 세션 저장 ======
+        st.session_state["last_response"] = response
+        if pdf_mode and docs:
+            st.session_state["last_docs"] = docs
+            st.session_state["last_file_hash"] = combined_hash
+        else:
+            st.session_state.pop("last_docs", None)
+
+        try:
+            if handler:
+                live_area.empty()
+        except Exception:
+            pass
+
         # 소스 전처리 후 세션 저장
         processed_sources = []
         _seen = set()
@@ -464,97 +502,66 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = f"죄송합니다. 일시적인 오류로 답변을 생성할 수 없습니다. 다시 시도해주세요."
                 st.error(f"응답 생성 오류: {e}")
 
-with st.chat_message("assistant"):
-    st.markdown(response)
     
-    # 문서 표시 (있을 때만)
-    if st.session_state.get("last_sources"):
-        with st.expander("🔎 참고 문서"):
-            for i, s in enumerate(st.session_state["last_sources"], 1):
-                st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
-                st.code(s["snippet"])
-
-    # ====== 실시간 요약/워드클라우드 생성 ======
-    if st.session_state.get("do_postprocess") and st.session_state.get("last_docs"):
-        st.markdown("---")
-        st.subheader("📊 문서 요약 및 시각화")
-        
-        try:
-            with st.spinner("📝 문서를 요약하고 있습니다..."):
-                summary = summarize_once(
-                    st.session_state["last_docs"], 
-                    st.session_state.get("last_file_hash", "nohash")
-                )
-            
-            # 요약 표시
-            st.success("**📋 문서 요약:**")
-            st.info(summary)
-
-            # 워드클라우드 생성
-            try:
-                with st.spinner("🎨 워드클라우드를 생성하고 있습니다..."):
-                    hash_key = st.session_state.get("last_file_hash", "nohash")
-                    wordcloud_img = generate_wordcloud_image_cached(summary, hash_key)
-                
-                st.success("**☁️ 키워드 클라우드:**")
-                st.image(wordcloud_img, use_container_width=True, caption="문서의 주요 키워드")
-                
-            except Exception as e:
-                st.warning(f"워드클라우드 생성 실패: {e}")
-                
-        except Exception as e:
-            st.error(f"요약 생성 실패: {e}")
-    
-    st.session_state.messages.append({"role": "assistant", "content": response})
-
-
-    # ====== 렌더 & 세션 저장 ======
-    st.session_state["last_response"] = response
-    if pdf_mode and docs:
-        st.session_state["last_docs"] = docs
-        st.session_state["last_file_hash"] = combined_hash
-    else:
-        st.session_state.pop("last_docs", None)
-
-    try:
-        if handler:
-            live_area.empty()
-    except Exception:
-        pass
-
+    # ====== 답변 표시 ======
     with st.chat_message("assistant"):
         st.markdown(response)
+
         # 문서 표시 (있을 때만)
         if st.session_state.get("last_sources"):
             with st.expander("🔎 참고 문서"):
                 for i, s in enumerate(st.session_state["last_sources"], 1):
                     st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
                     st.code(s["snippet"])
+        # 요약/워드클라우드 기능
+        if st.session_state.get("do_postprocess"):
+            if st.session_state.get("last_docs"):
+                st.markdown("---")
+                st.subheader("📊 문서 분석")
+                
+                try:
+                    with st.spinner("📝 문서를 분석하고 있습니다..."):
+                        summary = summarize_once(
+                            st.session_state["last_docs"], 
+                            st.session_state.get("last_file_hash", "nohash")
+                        )
+                    
+                    with st.expander("📋 문서 요약", expanded=True):
+                        st.info(summary)
+                    
+                    try:
+                        with st.spinner("🎨 키워드를 시각화하고 있습니다..."):
+                            hash_key = st.session_state.get("last_file_hash", "nohash")
+                            wordcloud_img = generate_wordcloud_image_cached(summary, hash_key)
+                        
+                        if wordcloud_img:
+                            with st.expander("☁️ 키워드 클라우드", expanded=True):
+                                st.image(wordcloud_img, use_container_width=True)
+                        
+                    except Exception as e:
+                        st.warning(f"워드클라우드 생성 실패: {e}")
+                        
+                except Exception as e:
+                    st.error(f"문서 분석 실패: {e}")
+            
+            elif len(response) > 100:
+                st.markdown("---")
+                st.subheader("💡 답변 키워드")
+                
+                try:
+                    simple_wordcloud = generate_wordcloud_image_cached(response, "response_based")
+                    if simple_wordcloud:
+                        with st.expander("☁️ 답변 키워드", expanded=False):
+                            st.image(simple_wordcloud, use_container_width=True)
+                            st.caption("현재 답변에서 추출한 주요 키워드들입니다.")
+                
+                except Exception as e:
+                    st.warning(f"키워드 분석 실패: {e}")
+        
         st.session_state.messages.append({"role": "assistant", "content": response})
 
-    
-        # 비동기 로그 저장
-        import threading
-
-        def log_async(q, a):
-            def _w():
-                conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        question TEXT, answer TEXT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                cur.execute("INSERT INTO chat_logs (question, answer) VALUES (?,?)", (q, a))
-                conn.commit()
-                conn.close()
-            threading.Thread(target=_w, daemon=True).start()
-
-        log_async(question, response)
+    # 비동기 로그 저장
+    log_async(question, response)
 
 # ====== 사이드바 ======
 with st.sidebar:
@@ -593,6 +600,9 @@ with st.sidebar:
             단기 시세 변동에 흔들리지 않고 일정 기간 이상 보유하여 수익을 기대하는 전략입니다.
             """
         )
+
+# can_export 변수 정의
+can_export = bool(st.session_state.get("last_response"))
 
 with st.sidebar:
     st.markdown("---")
