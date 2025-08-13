@@ -6,6 +6,7 @@ import threading
 from io import BytesIO
 
 import streamlit as st
+from datetime import datetime
 from dotenv import load_dotenv
 
 # ====== LLM & LangChain (LangChain 0.3.27) ======
@@ -38,7 +39,49 @@ from wordcloud import WordCloud, STOPWORDS
 # ====== 기본 설정 ======
 load_dotenv()
 
-st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
+st.set_page_config(page_title="금융 챗봇", page_icon="💹")
+
+def measure_response_time(func):
+    """응답 시간 측정 함수"""
+    start_time = time.time()
+    
+    try:
+        result = func()
+        success = True
+    except Exception as e:
+        success = False
+        st.session_state.performance_metrics["errors"] += 1
+        raise e
+    finally:
+        end_time = time.time()
+        response_time = end_time - start_time
+        
+        # 성능 메트릭 업데이트
+        st.session_state.performance_metrics["query_count"] += 1
+        st.session_state.performance_metrics["total_time"] += response_time
+        st.session_state.performance_metrics["response_times"].append({
+            "time": response_time,
+            "timestamp": datetime.now(),
+            "success": success
+        })
+        
+        # 실시간 성능 표시
+        avg_time = st.session_state.performance_metrics["total_time"] / st.session_state.performance_metrics["query_count"]
+        
+        if response_time > 10:
+            st.warning(f"⚠️ 응답시간: {response_time:.2f}초 (평균: {avg_time:.2f}초)")
+        else:
+            st.info(f"⚡ 응답시간: {response_time:.2f}초 (평균: {avg_time:.2f}초)")
+    
+    return result
+
+if "performance_metrics" not in st.session_state:
+    st.session_state.performance_metrics = {
+        "query_count": 0,
+        "total_time": 0,
+        "response_times": [],
+        "errors": 0
+    }
 
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
 if not api_key:
@@ -213,11 +256,12 @@ stuff_prompt = PromptTemplate(
         "- 수치/전략/위험요소는 구체적으로(기간, 조건 포함)\n"
         "- 컨텍스트에 없으면 '모른다'고 답하고 추측하지 말 것\n"
         "- 과도한 확정 표현 금지\n\n"
-        "**중요**: 여러 문서가 업로드된 경우:\n"
-        "- 모든 문서의 정보를 종합해서 답변\n"
-        "- 각 문서별로 다른 내용이 있으면 구분해서 설명\n"
-        "- 문서간 상충되는 내용이 있으면 명시적으로 언급\n"
-        "- 답변 시 어느 문서에서 나온 정보인지 출처 표시\n\n"
+        "**멀티 문서 처리 중요 규칙**:\n"
+        "1. 컨텍스트에 여러 문서의 정보가 포함되어 있으면 반드시 모든 문서를 종합하여 답변\n"
+        "2. 각 문서의 고유한 특징이나 차이점이 있으면 명확히 구분하여 설명\n"
+        "3. 문서간 공통점과 차이점을 비교 분석하여 제시\n"
+        "4. 답변 시 '첫 번째 문서에서는...', '두 번째 문서에서는...' 식으로 출처를 명시\n"
+        "5. 질문이 전체적인 비교나 종합을 요구하면 모든 문서를 아우르는 답변 제공\n\n"
         "컨텍스트:\n{context}\n\n"
         "질문: {question}\n"
         "답변:"
@@ -320,6 +364,34 @@ with st.sidebar:
             st.info("ℹ️ PDF를 업로드하고 질문하면 요약/워드클라우드가 생성됩니다")
 
 # ====== 워드클라우드 ======
+def debug_search_results(sources, question):
+    """검색 결과를 분석하여 멀티 파일 처리 상태를 확인"""
+    if not sources:
+        st.warning("⚠️ 검색 결과가 없습니다.")
+        return
+    
+    file_counts = {}
+    total_chars = 0
+    
+    for doc in sources:
+        source_file = doc.metadata.get("source_file", "Unknown")
+        file_counts[source_file] = file_counts.get(source_file, 0) + 1
+        total_chars += len(doc.page_content)
+    
+    with st.expander("🔍 검색 디버그 정보", expanded=False):
+        st.write(f"• 총 검색된 청크 수: {len(sources)}")
+        st.write(f"• 총 텍스트 길이: {total_chars:,} 문자")
+        
+        for file_name, count in file_counts.items():
+            percentage = (count / len(sources)) * 100
+            st.write(f"• {file_name}: {count}개 청크 ({percentage:.1f}%)")
+        
+        # 파일별 균형 검사
+        if len(file_counts) > 1:
+            counts = list(file_counts.values())
+            if max(counts) / min(counts) > 3:
+                st.warning("⚠️ 파일간 검색 결과 불균형 감지!")
+
 @st.cache_data(show_spinner=False)
 def generate_wordcloud_image_cached(text: str, _hash: str):
     """워드클라우드 이미지 생성 (캐시됨)"""
@@ -394,7 +466,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             pdf_mode = False
         else:
             # Dense(임베딩) 검색 설정
-            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 7, "fetch_k": 25, "lambda_mult": 0.5})
+            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 12, "fetch_k": 40, "lambda_mult": 0.3})
             
             # BM25 사용 가능 여부 확인 및 조건부 사용
             try:
@@ -451,9 +523,15 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         sources = []
         try:
             with st.spinner("🔍 문서에서 답변을 찾고 있습니다..."):
-                res = qa_chain.invoke({"query": question}, config=cfg)
+                res = measure_response_time(
+                    lambda: qa_chain.invoke({"query": question}, config=cfg)
+                )
                 response = (res.get("result") or "").strip()
                 sources = res.get("source_documents", []) or []
+                
+                # 검색 결과 디버깅 (개발용)
+                if st.session_state.get("debug_mode", False):
+                    debug_search_results(sources, question)
                 
         except Exception as e:
             error_msg = str(e).lower()
@@ -543,41 +621,39 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                     st.markdown("---")
 
         # 첫 번째 검색에서 답변이 없는 경우 백업 검색
-        if not response or len(response.strip()) < 20 or "모른다" in response:
+        if not response or len(response.strip()) < 50 or "모른다" in response:
             st.info("🔍 추가 검색을 시도합니다...")
             
+            # 백업 검색 체인 생성
             qa_chain_loose = RetrievalQA.from_chain_type(
                 llm=llm,
-                chain_type="stuff",
-                retriever=base_retriever if base_retriever else retriever,
+                chain_type="stuff", 
+                retriever=base_retriever,
                 chain_type_kwargs={"prompt": stuff_prompt},
                 return_source_documents=True,
             )
             
-            try:
-                # 질문 리프레이징 시도
-                rephrase_prompts = [
-                    f"다음 질문의 핵심 키워드만 추출해줘: {question}",
-                    f"다음 질문을 더 간단하게 바꿔줘: {question}",
-                    f"다음 질문과 관련된 다른 표현들을 알려줘: {question}"
-                ]
-                
-                for prompt in rephrase_prompts:
-                    r = llm.invoke(prompt)
-                    rephrased = getattr(r, "content", str(r)).strip()
-                    
-                    result2 = qa_chain_loose.invoke({"query": rephrased}, config=cfg)
-                    test_response = (result2.get("result") or "").strip()
-                    
-                    if test_response and "모른다" not in test_response and len(test_response) > 50:
-                        response = test_response
-                        st.info(f"💡 다시 검색한 질문: '{rephrased}'")
-                        break
-                        
-            except Exception:
-                pass
+            # 단순화된 백업 검색
+            backup_queries = [
+                f"핵심 키워드: {question}",
+                f"간단한 질문: {question}",
+                question  # 원본 질문
+            ]
 
-            # 여전히 답변이 없으면 키워드 기반 검색
+            for backup_query in backup_queries:
+                try:
+                    backup_result = qa_chain_loose.invoke({"query": backup_query})
+                    backup_response = (backup_result.get("result") or "").strip()
+                    
+                    if backup_response and "모른다" not in backup_response and len(backup_response) > 50:
+                        response = backup_response
+                        if backup_query != question:
+                            st.info(f"💡 '{backup_query}'로 재검색하여 답변을 찾았습니다.")
+                        break
+                except:
+                    continue
+
+            # 여전히 답변이 없으면 키워드 기반 마지막 시도
             if not response or len(response.strip()) < 20:
                 try:
                     keyword_prompt = f"다음 질문에서 가장 중요한 키워드 3개만 추출해줘 (쉼표로 구분): {question}"
@@ -595,18 +671,18 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 except Exception:
                     pass
 
-            qa_chain_loose = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=base_retriever if base_retriever else retriever,
-                chain_type_kwargs={"prompt": stuff_prompt},
-                return_source_documents=True,
-            )
-            try:
-                result2 = qa_chain_loose.invoke({"query": rephrased or question}, config=cfg)
-                response = (result2.get("result") or "").strip()
-            except Exception:
-                response = ""
+        qa_chain_loose = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=base_retriever if base_retriever else retriever,
+            chain_type_kwargs={"prompt": stuff_prompt},
+            return_source_documents=True,
+        )
+        try:
+            result2 = qa_chain_loose.invoke({"query": rephrased or question}, config=cfg)
+            response = (result2.get("result") or "").strip()
+        except Exception:
+            response = ""
 
         if not response:
             try:
@@ -628,13 +704,11 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     else:
         prompt = PromptTemplate.from_template(
             template=(
-                "너는 한국어 금융 전문가야. 아래 '컨텍스트'에서 관련된 정보를 찾아 답해.\n"
+                "너는 한국어 금융 전문가야. 일반적인 금융 지식을 바탕으로 답변해줘.\n"
                 "- 한국어만 사용할 것\n"
-                "- 컨텍스트에 직접적인 답이 없어도, 관련된 내용이 있으면 그것을 바탕으로 도움이 되는 답변을 해줘\n"
                 "- 초보자도 이해 가능하게 단계적으로 설명\n"
                 "- 수치/전략/위험요소는 구체적으로(기간, 조건 포함)\n"
-                "- 추측보다는 컨텍스트 기반으로 답변하되, 유용한 일반적 정보는 포함해도 됨\n\n"
-                "컨텍스트:\n{context}\n\n"
+                "- 유용한 일반적 정보를 포함해도 됨\n\n"
                 "질문: {question}\n"
                 "답변:"
             )
@@ -650,7 +724,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 response = "⏳ 요청이 많아 잠시 대기 중입니다. 1분 후 다시 시도해주세요."
                 st.warning("API 요청 한도 초과. 잠시 후 다시 시도해주세요.")
             elif "api_key" in error_msg:
-                response = "🔑 API 키 문제가 발생했습니다. 관리자에게 문의해주세요."
+                response = "🔒 API 키 문제가 발생했습니다. 관리자에게 문의해주세요."
                 st.error("API 키 오류 발생")
             else:
                 response = f"죄송합니다. 일시적인 오류로 답변을 생성할 수 없습니다. 다시 시도해주세요."
@@ -803,6 +877,55 @@ with st.sidebar:
                     mime="text/plain",
                     key="download_chat"
                 )
+
+# 성능 위젯
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🔧 개발자 도구")
+    
+    debug_mode = st.toggle(
+        "🐛 검색 디버그", 
+        key="debug_mode", 
+        value=False,
+        help="검색 결과의 파일별 분포를 확인합니다."
+    )
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("📊 실시간 성능")
+    
+    metrics = st.session_state.performance_metrics
+    
+    if metrics["query_count"] > 0:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric(
+                "총 쿼리", 
+                metrics["query_count"],
+                help="이번 세션에서 처리한 총 질문 수"
+            )
+            
+        with col2:
+            avg_time = metrics["total_time"] / metrics["query_count"]
+            st.metric(
+                "평균 응답시간", 
+                f"{avg_time:.1f}초",
+                help="평균적인 응답 생성 시간"
+            )
+        
+        # 성공률 표시
+        success_rate = ((metrics["query_count"] - metrics["errors"]) / metrics["query_count"]) * 100
+        st.metric("성공률", f"{success_rate:.1f}%")
+        
+        # 최근 응답시간 차트 (간단한 라인)
+        if len(metrics["response_times"]) > 1:
+            recent_times = [r["time"] for r in metrics["response_times"][-10:]]
+            st.line_chart(recent_times)
+            st.caption("최근 10개 응답시간 추이")
+    else:
+        st.info("아직 성능 데이터가 없습니다.")
+
 
 # ====== 포스트프로세싱 위젯 ======
 
