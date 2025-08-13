@@ -810,6 +810,7 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
 
 # ====== 사이드바 ======
 with st.sidebar:
+    st.markdown("---")
     st.markdown("## 📜 투자 FAQ & 가이드")
     with st.expander("📌 자주 묻는 질문"):
         st.markdown(
