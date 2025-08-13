@@ -525,7 +525,6 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 pass
     else:
         prompt = PromptTemplate.from_template(
-            input_variables=["context", "question"],
             template=(
                 "너는 한국어 금융 전문가야. 아래 '컨텍스트'에서 관련된 정보를 찾아 답해.\n"
                 "- 한국어만 사용할 것\n"
@@ -536,12 +535,12 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                 "컨텍스트:\n{context}\n\n"
                 "질문: {question}\n"
                 "답변:"
-            ),
+            )
         )
 
         try:
             with st.spinner("💭 답변을 생성하고 있습니다..."):
-                r = llm.invoke(prompt.format(question=question), config=cfg)
+                r = llm.invoke(prompt.format(context="", question=question), config=cfg)
                 response = getattr(r, "content", str(r))
         except Exception as e:
             error_msg = str(e).lower()
