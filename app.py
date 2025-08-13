@@ -352,11 +352,17 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             st.info("💡 파일 크기가 너무 크거나 네트워크 문제일 수 있습니다. 잠시 후 다시 시도해주세요.")
             pdf_mode = False
         else:
-            # Dense(임베딩) + Keyword(BM25) 하이브리드
-            dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3, "fetch_k": 12})
-            bm25 = BM25Retriever.from_documents(docs)
-            ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
-
+            # BM25 사용 가능 여부 확인
+            try:
+                from langchain_community.retrievers import BM25Retriever
+                bm25 = BM25Retriever.from_documents(docs)
+                ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
+                st.info("🔍 하이브리드 검색 (Dense + BM25) 활성화")
+            except ImportError:
+                # BM25를 사용할 수 없는 경우 Dense만 사용
+                ensemble = dense
+                st.info("🔍 Dense 검색 활성화 (BM25 라이브러리 미설치)")
+                
             compressor = LLMChainExtractor.from_llm(llm)
             retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=ensemble)
 
