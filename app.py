@@ -107,27 +107,52 @@ def build_vs_multi(
 
     all_docs = []
     tmp_paths = []
+    processed_files = []  # 성공적으로 처리된 파일 목록
+    
     try:
-        for raw, fname in zip(files, file_names):
+        for idx, (raw, fname) in enumerate(zip(files, file_names)):
             if not raw:
+                st.warning(f"⚠️ '{fname}': 파일이 비어있습니다.")
                 continue
+                
             h = hashlib.md5(raw).hexdigest()
             path = f"/tmp/{h}.pdf"
-            with open(path, "wb") as f:
-                f.write(raw)
-            tmp_paths.append(path)
-
-            # PDF 로드 (암호화/깨짐 예외 처리)
+            
             try:
+                with open(path, "wb") as f:
+                    f.write(raw)
+                tmp_paths.append(path)
+
+                # PDF 로드 (암호화/깨짐 예외 처리)
                 pages = PyPDFLoader(path).load()
                 if not pages:
                     st.warning(f"⚠️ '{fname}': 문서가 비어있습니다.")
                     continue
+                    
                 total_text = "".join(page.page_content for page in pages)
                 if len(total_text.strip()) < 30:
                     st.warning(f"⚠️ '{fname}': 텍스트 추출이 어렵습니다.")
                     continue
 
+                # 청크 분할
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=chunk_size, 
+                    chunk_overlap=chunk_overlap
+                )
+                docs = splitter.split_documents(pages)
+                
+                # 각 청크에 파일 정보 추가
+                for d in docs:
+                    d.metadata = {
+                        **d.metadata, 
+                        "source_file": fname,
+                        "file_index": idx,  # 파일 순서 추가
+                        "total_files": len(files)  # 전체 파일 수 추가
+                    }
+                
+                all_docs.extend(docs)
+                processed_files.append(fname)
+                st.success(f"✅ '{fname}' 처리 완료 ({len(docs)}개 청크)")
 
             except Exception as e:
                 error_msg = str(e).lower()
@@ -141,19 +166,22 @@ def build_vs_multi(
                     st.warning(f"❌ '{fname}' 로드 실패: {e}")
                 continue
 
-            splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            docs = splitter.split_documents(pages)
-            for d in docs:
-                d.metadata = {**d.metadata, "source_file": fname}
-            all_docs.extend(docs)
-
         if not all_docs:
             raise ValueError("유효한 페이지가 없습니다.")
 
+        # 처리 결과 요약 표시
+        st.info(f"📄 총 {len(processed_files)}개 파일에서 {len(all_docs)}개 청크를 생성했습니다.")
+        
+        # 파일별 청크 수 표시
+        file_chunk_counts = {}
+        for doc in all_docs:
+            fname = doc.metadata.get("source_file", "Unknown")
+            file_chunk_counts[fname] = file_chunk_counts.get(fname, 0) + 1
+        
+        for fname, count in file_chunk_counts.items():
+            st.write(f"  • {fname}: {count}개 청크")
+
         try:
-            if not all_docs:
-                raise ValueError("처리 가능한 문서가 없습니다.")
-            
             vs = FAISS.from_documents(all_docs, OpenAIEmbeddings(model=embed_model))
             st.success(f"✅ {len(all_docs)}개의 문서 청크로 벡터 데이터베이스를 구성했습니다.")
             
@@ -173,6 +201,8 @@ def build_vs_multi(
             except Exception:
                 pass
 
+    #show_file_processing_status(processed_files, len(files))
+
 # ====== 프롬프트 ======
 stuff_prompt = PromptTemplate(
     input_variables=["context", "question"],
@@ -183,8 +213,11 @@ stuff_prompt = PromptTemplate(
         "- 수치/전략/위험요소는 구체적으로(기간, 조건 포함)\n"
         "- 컨텍스트에 없으면 '모른다'고 답하고 추측하지 말 것\n"
         "- 과도한 확정 표현 금지\n\n"
-        "- 여러 문서가 있다면 모든 문서의 정보를 종합해서 답변\n"
+        "**중요**: 여러 문서가 업로드된 경우:\n"
+        "- 모든 문서의 정보를 종합해서 답변\n"
         "- 각 문서별로 다른 내용이 있으면 구분해서 설명\n"
+        "- 문서간 상충되는 내용이 있으면 명시적으로 언급\n"
+        "- 답변 시 어느 문서에서 나온 정보인지 출처 표시\n\n"
         "컨텍스트:\n{context}\n\n"
         "질문: {question}\n"
         "답변:"
@@ -452,27 +485,77 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         except Exception:
             pass
 
+
         # 소스 전처리 후 세션 저장
         processed_sources = []
         _seen = set()
+        file_sources = {}
+
         for d in sources:
             src_name = d.metadata.get("source_file") or os.path.basename(d.metadata.get("source", "?"))
             pg = d.metadata.get("page")
-            pg_num = (pg + 1) if isinstance(pg, int) else "?"  # PyPDFLoader는 0-index 가능성
+            pg_num = (pg + 1) if isinstance(pg, int) else "?"
+
+            # 파일별로 그룹화
+            if src_name not in file_sources:
+                file_sources[src_name] = []
+
             key = (src_name, pg_num)
             if key in _seen:
                 continue
             _seen.add(key)
+
             snippet = (d.page_content or "").strip()
             if len(snippet) > 400:
                 snippet = snippet[:400] + "…"
-            processed_sources.append({"file": src_name, "page": pg_num, "snippet": snippet})
+            
+            file_sources[src_name].append({"page": pg_num, "snippet": snippet})
+
+        # 파일별로 정리된 소스 정보 생성
+        for fname, pages in file_sources.items():
+            for page_info in pages:
+                processed_sources.append({
+                    "file": fname, 
+                    "page": page_info["page"], 
+                    "snippet": page_info["snippet"]
+                })
 
         st.session_state["last_sources"] = processed_sources
 
+        # 답변 표시 부분에서 파일별로 그룹화해서 보여주기:
+        if st.session_state.get("last_sources"):
+            with st.expander("🔎 참고 문서"):
+                # 파일별로 그룹화해서 표시
+                current_sources = st.session_state["last_sources"]
+                file_groups = {}
+                
+                for source in current_sources:
+                    fname = source["file"]
+                    if fname not in file_groups:
+                        file_groups[fname] = []
+                    file_groups[fname].append(source)
+                
+                for fname, sources_in_file in file_groups.items():
+                    st.markdown(f"**📁 {fname}**")
+                    for i, s in enumerate(sources_in_file, 1):
+                        st.markdown(f"  {i}. p.{s['page']}")
+                        st.code(s["snippet"], language="text")
+                    st.markdown("---")
 
-        if not response:
+        # 첫 번째 검색에서 답변이 없는 경우 백업 검색
+        if not response or len(response.strip()) < 20 or "모른다" in response:
+            st.info("🔍 추가 검색을 시도합니다...")
+            
+            qa_chain_loose = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=base_retriever if base_retriever else retriever,
+                chain_type_kwargs={"prompt": stuff_prompt},
+                return_source_documents=True,
+            )
+            
             try:
+                # 질문 리프레이징 시도
                 rephrase_prompts = [
                     f"다음 질문의 핵심 키워드만 추출해줘: {question}",
                     f"다음 질문을 더 간단하게 바꿔줘: {question}",
@@ -488,10 +571,29 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
                     
                     if test_response and "모른다" not in test_response and len(test_response) > 50:
                         response = test_response
+                        st.info(f"💡 다시 검색한 질문: '{rephrased}'")
                         break
                         
             except Exception:
                 pass
+
+            # 여전히 답변이 없으면 키워드 기반 검색
+            if not response or len(response.strip()) < 20:
+                try:
+                    keyword_prompt = f"다음 질문에서 가장 중요한 키워드 3개만 추출해줘 (쉼표로 구분): {question}"
+                    keyword_result = llm.invoke(keyword_prompt)
+                    keywords = getattr(keyword_result, "content", "").strip()
+                    
+                    if keywords:
+                        result3 = qa_chain_loose.invoke({"query": keywords}, config=cfg)
+                        test_response = (result3.get("result") or "").strip()
+                        
+                        if test_response and "모른다" not in test_response:
+                            response = f"키워드 '{keywords}' 기반 검색 결과:\n\n{test_response}"
+                            st.info(f"🔍 키워드 검색: '{keywords}'")
+                            
+                except Exception:
+                    pass
 
             qa_chain_loose = RetrievalQA.from_chain_type(
                 llm=llm,
@@ -559,12 +661,29 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
     with st.chat_message("assistant"):
         st.markdown(response)
 
-        # 문서 표시 (있을 때만)
+        # 참고 문서 표시 (파일별로 그룹화)
         if st.session_state.get("last_sources"):
             with st.expander("🔎 참고 문서"):
-                for i, s in enumerate(st.session_state["last_sources"], 1):
-                    st.markdown(f"**{i}. {s['file']} — p.{s['page']}**")
-                    st.code(s["snippet"])
+                current_sources = st.session_state["last_sources"]
+                file_groups = {}
+                
+                # 파일별로 그룹화
+                for source in current_sources:
+                    fname = source["file"]
+                    if fname not in file_groups:
+                        file_groups[fname] = []
+                    file_groups[fname].append(source)
+                
+                # 파일별로 표시
+                for idx, (fname, sources_in_file) in enumerate(file_groups.items()):
+                    st.markdown(f"**📁 {fname}**")
+                    for i, s in enumerate(sources_in_file, 1):
+                        st.markdown(f"  {i}. p.{s['page']}")
+                        st.code(s["snippet"], language="text")
+
+                    if idx < len(file_groups) - 1:
+                        st.markdown("---")
+
         # 요약/워드클라우드 기능
         if st.session_state.get("do_postprocess"):
             if st.session_state.get("last_docs"):
