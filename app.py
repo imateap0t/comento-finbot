@@ -21,6 +21,12 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain.retrievers import EnsembleRetriever
 
+try:
+    from langchain_community.retrievers import BM25Retriever
+    BM25_AVAILABLE = True
+except ImportError:
+    BM25_AVAILABLE = False
+
 # ====== PDF/시각화 ======
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -351,19 +357,23 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             st.info("💡 파일 크기가 너무 크거나 네트워크 문제일 수 있습니다. 잠시 후 다시 시도해주세요.")
             pdf_mode = False
         else:
+            # Dense(임베딩) 검색 설정
             dense = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3, "fetch_k": 12})
             
-            if BM25_AVAILABLE:
-                try:
-                    bm25 = BM25Retriever.from_documents(docs)
-                    ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
-                    st.success("🔍 하이브리드 검색 (Dense + BM25) 활성화")
-                except Exception as e:
-                    ensemble = dense
-                    st.info("🔍 Dense 검색 활성화 (BM25 초기화 실패)")
-            else:
+            # BM25 사용 가능 여부 확인 및 조건부 사용
+            try:
+                from langchain_community.retrievers import BM25Retriever
+                bm25 = BM25Retriever.from_documents(docs)
+                ensemble = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.35, 0.65])
+                st.success("🔍 하이브리드 검색 (Dense + BM25) 활성화")
+            except ImportError:
+                # BM25 라이브러리가 없는 경우
                 ensemble = dense
-                st.info("🔍 Dense 검색 활성화")
+                st.info("🔍 Dense 검색 활성화 (BM25 라이브러리 미설치)")
+            except Exception as e:
+                # BM25 초기화 실패한 경우
+                ensemble = dense
+                st.info("🔍 Dense 검색 활성화 (BM25 초기화 실패)")
 
             compressor = LLMChainExtractor.from_llm(llm)
             retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=ensemble)
