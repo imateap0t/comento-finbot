@@ -36,10 +36,28 @@ st.set_page_config(page_title="ETF 챗봇", page_icon="💹")
 
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
 if not api_key:
-    st.stop()  # API 키 없으면 중단
+    st.error("""
+    🚨 **OpenAI API 키가 설정되지 않았습니다**
+    
+    `.env` 파일에 다음과 같이 추가해주세요:
+    ```
+    OPENAI_API_KEY=your_api_key_here
+    ```
+    
+    또는 Streamlit Cloud에서 Secrets를 설정해주세요.
+    """)
+    st.stop()
 
 # LLM 설정
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+try:
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, api_key=api_key)
+    # API 키 유효성
+    test_response = llm.invoke("test")
+except Exception as e:
+    st.error(f"🚨 OpenAI API 연결 실패: {str(e)}")
+    if "api_key" in str(e).lower():
+        st.error("API 키가 유효하지 않습니다. 키를 확인해주세요.")
+    st.stop()
 
 # UI 헤더
 st.title("💹 금융 상담 챗봇")
@@ -96,8 +114,24 @@ def build_vs_multi(
             # PDF 로드 (암호화/깨짐 예외 처리)
             try:
                 pages = PyPDFLoader(path).load()
+                if not pages:
+                    st.warning(f"⚠️ '{fname}': 문서가 비어있습니다.")
+                    continue
+                total_text = "".join(page.page_content for page in pages)
+                if len(total_text.strip()) < 50:
+                    st.warning(f"⚠️ '{fname}': 텍스트 추출이 어렵습니다.")
+                    continue
+
             except Exception as e:
-                st.warning(f"'{fname}' 로드 실패: {e}")
+                error_msg = str(e).lower()
+                if "encrypted" in error_msg or "password" in error_msg:
+                    st.warning(f"🔒 '{fname}': 암호화된 PDF입니다. 암호를 해제하고 다시 업로드해주세요.")
+                elif "damaged" in error_msg or "corrupted" in error_msg:
+                    st.warning(f"💥 '{fname}': 손상된 파일입니다.")
+                elif "permission" in error_msg:
+                    st.warning(f"🚫 '{fname}': 파일 접근 권한이 없습니다.")
+                else:
+                    st.warning(f"❌ '{fname}' 로드 실패: {e}")
                 continue
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
@@ -109,8 +143,20 @@ def build_vs_multi(
         if not all_docs:
             raise ValueError("유효한 페이지가 없습니다.")
 
-        vs = FAISS.from_documents(all_docs, OpenAIEmbeddings(model=embed_model))
-        return vs, all_docs
+        try:
+            if not all_docs:
+                raise ValueError("처리 가능한 문서가 없습니다.")
+            
+            vs = FAISS.from_documents(all_docs, OpenAIEmbeddings(model=embed_model))
+            st.success(f"✅ {len(all_docs)}개의 문서 청크로 벡터 데이터베이스를 구성했습니다.")
+            
+        except Exception as e:
+            st.error(f"🚨 벡터 데이터베이스 생성 실패: {e}")
+            if "api" in str(e).lower():
+                st.error("OpenAI API 호출 중 오류가 발생했습니다. API 키와 네트워크를 확인해주세요.")
+            raise e
+        
+
     finally:
         # 임시파일 정리
         for p in tmp_paths:
@@ -217,9 +263,20 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         pdf_mode, docs, retriever, base_retriever = False, None, None, None
 
         try:
-            vectorstore, docs = build_vs_multi(raws, names, chunk_size=1000, chunk_overlap=150, embed_model="text-embedding-3-small")
+            with st.spinner("📄 PDF 문서를 처리하고 있습니다..."):
+                vectorstore, docs = build_vs_multi(
+                    raws, names, 
+                    chunk_size=1000, 
+                    chunk_overlap=150, 
+                    embed_model="text-embedding-3-small"
+                )
+        except ValueError as e:
+            st.error(f"📄 문서 처리 오류: {e}")
+            st.info("💡 다른 PDF 파일을 업로드하거나, 텍스트가 포함된 PDF인지 확인해주세요.")
+            pdf_mode = False
         except Exception as e:
-            st.error(f"PDF 처리 오류: {e}")
+            st.error(f"🚨 예상치 못한 오류가 발생했습니다: {e}")
+            st.info("💡 파일 크기가 너무 크거나 네트워크 문제일 수 있습니다. 잠시 후 다시 시도해주세요.")
             pdf_mode = False
         else:
             # Dense(임베딩) + Keyword(BM25) 하이브리드
@@ -266,11 +323,25 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
         response = ""
         sources = []
         try:
-            res = qa_chain.invoke({"query": question}, config=cfg)
-            response = (res.get("result") or "").strip()
-            sources = res.get("source_documents", []) or []
-        except Exception:
-            response = ""
+            with st.spinner("🔍 문서에서 답변을 찾고 있습니다..."):
+                res = qa_chain.invoke({"query": question}, config=cfg)
+                response = (res.get("result") or "").strip()
+                sources = res.get("source_documents", []) or []
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "rate limit" in error_msg:
+                st.error("⏳ API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+                response = "잠시 후 다시 질문해주세요."
+            elif "timeout" in error_msg:
+                st.error("⏱️ 응답 시간이 초과되었습니다. 질문을 더 간단하게 해보세요.")
+                response = "질문을 더 간단하게 해주시겠어요?"
+            elif "token" in error_msg:
+                st.error("📝 문서가 너무 길어 처리할 수 없습니다. 더 작은 PDF로 시도해보세요.")
+                response = "문서가 너무 큽니다. 더 작은 문서로 시도해주세요."
+            else:
+                st.error(f"🚨 답변 생성 중 오류: {e}")
+                response = "죄송합니다. 일시적인 오류가 발생했습니다."
             sources = []
 
         # 소스 전처리 후 세션 저장
@@ -329,10 +400,20 @@ if question := st.chat_input("무엇을 도와드릴까요?"):
             """
         )
         try:
-            r = llm.invoke(prompt.format(question=question), config=cfg)
-            response = getattr(r, "content", str(r))
+            with st.spinner("💭 답변을 생성하고 있습니다..."):
+                r = llm.invoke(prompt.format(question=question), config=cfg)
+                response = getattr(r, "content", str(r))
         except Exception as e:
-            response = f"응답 생성 중 오류가 발생했습니다: {e}"
+            error_msg = str(e).lower()
+            if "rate limit" in error_msg:
+                response = "⏳ 요청이 많아 잠시 대기 중입니다. 1분 후 다시 시도해주세요."
+                st.warning("API 요청 한도 초과. 잠시 후 다시 시도해주세요.")
+            elif "api_key" in error_msg:
+                response = "🔑 API 키 문제가 발생했습니다. 관리자에게 문의해주세요."
+                st.error("API 키 오류 발생")
+            else:
+                response = f"죄송합니다. 일시적인 오류로 답변을 생성할 수 없습니다. 다시 시도해주세요."
+                st.error(f"응답 생성 오류: {e}")
 
     # ====== 렌더 & 세션 저장 ======
     st.session_state["last_response"] = response
@@ -415,6 +496,35 @@ with st.sidebar:
             단기 시세 변동에 흔들리지 않고 일정 기간 이상 보유하여 수익을 기대하는 전략입니다.
             """
         )
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🔄 대화 관리")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ 대화 삭제", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.pop("last_response", None)
+            st.session_state.pop("last_sources", None)
+            st.rerun()
+    
+    with col2:
+        if st.button("💾 대화 저장", use_container_width=True):
+            if st.session_state.messages:
+                # 대화를 텍스트로 변환
+                conversation = ""
+                for msg in st.session_state.messages:
+                    role = "사용자" if msg["role"] == "user" else "챗봇"
+                    conversation += f"{role}: {msg['content']}\n\n"
+                
+                st.download_button(
+                    "📄 대화 내역 다운로드",
+                    data=conversation.encode('utf-8'),
+                    file_name=f"대화기록_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain",
+                    key="download_chat"
+                )
 
 # ====== 포스트프로세싱 위젯 ======
 can_export = bool(st.session_state.get("last_response"))
